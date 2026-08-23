@@ -1,0 +1,45 @@
+# =============================================================
+# MonTour — requirements.txt
+# Dépendances Python du backend Django
+# =============================================================
+
+# Core Django
+Django>=5.1,<6.0
+djangorestframework==3.15.1
+gunicorn
+djangorestframework-simplejwt==5.3.1
+django-cors-headers==4.3.1
+django-filter==23.5
+
+# Base de données
+psycopg2-binary==2.9.9          # Driver PostgreSQL
+
+# Documentation API
+drf-spectacular==0.27.1
+
+# Sécurité & Auth
+cryptography==42.0.2
+requests==2.31.0
+
+# IA / ML
+tensorflow==2.15.0               # Pour entraîner le modèle (serveur)
+# tflite-runtime==2.14.0         # Uniquement si on sert le modèle côté serveur
+
+# Firebase Admin (notifications push)
+firebase-admin==6.4.0
+
+# Utilitaires
+python-dotenv==1.0.1
+Pillow==10.2.0                   # Traitement images (avatars)
+celery==5.3.6                    # Tâches asynchrones (rappels)
+redis==5.0.1                     # Broker Celery + cache
+django-redis==5.4.0
+
+# Serveur production
+gunicorn==21.2.0
+whitenoise==6.6.0                # Fichiers statiques en production
+
+# Tests
+pytest==8.0.0
+pytest-django==4.8.0
+factory-boy==3.3.0
