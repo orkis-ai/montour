@@ -84,14 +84,34 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'montour.wsgi.application'
 
-# ─── Base de données (SQLite par défaut si env USE_SQLITE est True ou si Postgres non configuré) ───────
-if os.getenv('USE_SQLITE', 'True').lower() in ('true', '1', 'yes'):
-    # Sur Vercel (serverless lambda), seul /tmp est accessible en écriture
-    if os.getenv('VERCEL') or os.getenv('AWS_LAMBDA_FUNCTION_NAME'):
-        sqlite_db = Path('/tmp') / 'db.sqlite3'
-    else:
-        sqlite_db = BASE_DIR / 'db.sqlite3'
+# ─── Base de données (PostgreSQL en prod / Vercel, SQLite en local) ───
+DATABASE_URL = os.getenv('DATABASE_URL') or os.getenv('POSTGRES_URL')
 
+if DATABASE_URL:
+    try:
+        import dj_database_url
+        DATABASES = {
+            'default': dj_database_url.config(
+                default=DATABASE_URL,
+                conn_max_age=600,
+                conn_health_checks=True,
+            )
+        }
+    except ImportError:
+        import urllib.parse
+        url = urllib.parse.urlparse(DATABASE_URL)
+        DATABASES = {
+            'default': {
+                'ENGINE': 'django.db.backends.postgresql',
+                'NAME': url.path.lstrip('/'),
+                'USER': url.username,
+                'PASSWORD': url.password,
+                'HOST': url.hostname,
+                'PORT': url.port or 5432,
+            }
+        }
+elif os.getenv('USE_SQLITE', 'True').lower() in ('true', '1', 'yes') and not os.getenv('DB_HOST'):
+    sqlite_db = BASE_DIR / 'db.sqlite3'
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
