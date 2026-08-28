@@ -7,3 +7,9 @@ dependencies = [
     "djangorestframework",
     "gunicorn"
 ]
+
+[tool.pyrefly]
+project-includes = [
+    "**/*.py*",
+    "**/*.ipynb",
+]

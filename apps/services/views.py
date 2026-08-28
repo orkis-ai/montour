@@ -3,13 +3,12 @@
 # =============================================================
 
 from rest_framework import generics, permissions, filters
-from rest_framework.response import Response
-from rest_framework.views import APIView
 from django_filters.rest_framework import DjangoFilterBackend
 
 from .models import Service
 from .serializers import ServiceSerializer, ServiceCreateUpdateSerializer
 from montour.utils import api_response, api_error
+from montour.permissions import IsAdminUser
 
 
 class ServiceListView(generics.ListAPIView):
@@ -31,39 +30,37 @@ class ServiceDetailView(generics.RetrieveAPIView):
     queryset           = Service.objects.all()
 
 
-from rest_framework.exceptions import PermissionDenied
-
 class ServiceCreateView(generics.CreateAPIView):
-    """POST /api/v1/services/ — Créer un service (Admin)."""
+    """POST /api/v1/services/create/ — Créer un service (Admin)."""
     serializer_class   = ServiceCreateUpdateSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsAdminUser]
 
     def perform_create(self, serializer):
-        if not self.request.user.is_admin:
-            raise PermissionDenied('Seul un administrateur peut créer un service.')
         service = serializer.save()
         from apps.queues.models import Queue
         Queue.objects.create(service=service)
 
     def create(self, request, *args, **kwargs):
-        super().create(request, *args, **kwargs)
-        return api_response(message='Service créé avec succès.', status_code=201)
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        return api_response(data=serializer.data, message='Service créé avec succès.', status_code=201)
 
 
 class ServiceUpdateView(generics.UpdateAPIView):
-    """PUT/PATCH /api/v1/services/<id>/ — Modifier un service (Admin)."""
+    """PUT/PATCH /api/v1/services/<id>/update/ — Modifier un service (Admin)."""
     serializer_class   = ServiceCreateUpdateSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsAdminUser]
     queryset           = Service.objects.all()
 
 
 class ServiceDeleteView(generics.DestroyAPIView):
-    """DELETE /api/v1/services/<id>/ — Désactiver un service (Admin)."""
-    permission_classes = [permissions.IsAuthenticated]
+    """DELETE /api/v1/services/<id>/delete/ — Désactiver un service (Admin)."""
+    permission_classes = [permissions.IsAuthenticated, IsAdminUser]
     queryset           = Service.objects.all()
 
     def destroy(self, request, *args, **kwargs):
         service = self.get_object()
         service.is_active = False
-        service.save()
-        return api_response(message='Service désactivé.')
+        service.save(update_fields=['is_active'])
+        return api_response(message='Service désactivé avec succès.')

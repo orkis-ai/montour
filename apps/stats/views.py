@@ -12,16 +12,14 @@ from apps.tickets.models import Ticket
 from apps.services.models import Service
 from apps.accounts.models import User
 from montour.utils import api_response, api_error
+from montour.permissions import IsAgentOrAdmin
 
 
 class GlobalStatsView(APIView):
     """GET /api/v1/stats/ — Tableau de bord statistiques global (Admin/Agent)."""
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsAgentOrAdmin]
 
     def get(self, request):
-        if not (request.user.is_admin or request.user.is_agent):
-            return api_error('Accès réservé aux administrateurs et agents.', 403)
-
         today    = timezone.now().date()
         all_tkts = Ticket.objects.all()
 
@@ -100,10 +98,11 @@ class GlobalStatsView(APIView):
 
 
 class UserStatsView(APIView):
-    """GET /api/v1/stats/me/ — Statistiques personnelles de l'utilisateur connecté."""
+    """GET /api/v1/stats/me/ — Statistiques personnelles de l'utilisateur connecté (RLS)."""
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        # RLS: statistiques limitées strictement aux tickets de l'utilisateur
         qs = Ticket.objects.filter(user=request.user)
         return api_response(data={
             'total':     qs.count(),
@@ -122,12 +121,10 @@ class UserStatsView(APIView):
 
 
 class ServiceStatsView(APIView):
-    """GET /api/v1/stats/services/<service_id>/ — Stats détaillées d'un service."""
-    permission_classes = [permissions.IsAuthenticated]
+    """GET /api/v1/stats/services/<service_id>/ — Stats détaillées d'un service (Agent/Admin)."""
+    permission_classes = [permissions.IsAuthenticated, IsAgentOrAdmin]
 
     def get(self, request, service_id):
-        if not (request.user.is_admin or request.user.is_agent):
-            return api_error('Accès refusé.', 403)
         try:
             svc = Service.objects.get(pk=service_id)
         except Service.DoesNotExist:

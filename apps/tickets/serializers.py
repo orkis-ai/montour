@@ -6,6 +6,7 @@ from rest_framework import serializers
 from apps.accounts.serializers import UserSerializer
 from apps.services.serializers import ServiceSerializer
 from .models import Ticket
+from montour.validators import sanitize_text
 
 
 class TicketSerializer(serializers.ModelSerializer):
@@ -46,6 +47,9 @@ class TicketRatingSerializer(serializers.ModelSerializer):
         fields = ['rating', 'feedback']
 
     def validate_rating(self, value):
-        if not (1 <= value <= 5):
-            raise serializers.ValidationError('La note doit être entre 1 et 5.')
+        if not isinstance(value, int) or not (1 <= value <= 5):
+            raise serializers.ValidationError('La note doit être un nombre entier entre 1 et 5.')
         return value
+
+    def validate_feedback(self, value):
+        return sanitize_text(value, max_length=1000)

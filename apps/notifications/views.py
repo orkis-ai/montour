@@ -12,11 +12,12 @@ from .serializers import NotificationSerializer
 
 
 class NotificationListView(generics.ListAPIView):
-    """GET /api/v1/notifications/ — Notifications de l'utilisateur connecté."""
+    """GET /api/v1/notifications/ — Notifications de l'utilisateur connecté (RLS)."""
     serializer_class   = NotificationSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        # RLS: filtre systématique par utilisateur connecté
         qs = Notification.objects.filter(user=self.request.user)
         if self.request.query_params.get('unread'):
             qs = qs.filter(is_read=False)
@@ -24,7 +25,7 @@ class NotificationListView(generics.ListAPIView):
 
 
 class NotificationReadAllView(APIView):
-    """PUT /api/v1/notifications/read-all/ — Marquer toutes comme lues."""
+    """PUT /api/v1/notifications/read-all/ — Marquer toutes comme lues (RLS)."""
     permission_classes = [permissions.IsAuthenticated]
 
     def put(self, request):
@@ -35,20 +36,21 @@ class NotificationReadAllView(APIView):
 
 
 class NotificationReadView(APIView):
-    """PUT /api/v1/notifications/<id>/read/ — Marquer une seule comme lue."""
+    """PUT /api/v1/notifications/<id>/read/ — Marquer une seule comme lue (RLS)."""
     permission_classes = [permissions.IsAuthenticated]
 
     def put(self, request, notif_id):
         try:
+            # RLS: vérification de propriété
             notif = Notification.objects.get(pk=notif_id, user=request.user)
             notif.mark_read()
-            return api_response(message='Notification lue.')
+            return api_response(message='Notification marquée comme lue.')
         except Notification.DoesNotExist:
             return api_error('Notification introuvable.', 404)
 
 
 class UnreadCountView(APIView):
-    """GET /api/v1/notifications/unread-count/ — Nombre de non lues."""
+    """GET /api/v1/notifications/unread-count/ — Nombre de non lues (RLS)."""
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
@@ -57,11 +59,12 @@ class UnreadCountView(APIView):
 
 
 class NotificationDeleteView(APIView):
-    """DELETE /api/v1/notifications/<id>/ — Supprimer une notification."""
+    """DELETE /api/v1/notifications/<id>/delete/ — Supprimer une notification (RLS)."""
     permission_classes = [permissions.IsAuthenticated]
 
     def delete(self, request, notif_id):
         try:
+            # RLS: vérification de propriété
             notif = Notification.objects.get(pk=notif_id, user=request.user)
             notif.delete()
             return api_response(message='Notification supprimée.')

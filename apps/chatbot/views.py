@@ -9,8 +9,9 @@ from django.conf import settings
 from rest_framework import permissions
 from rest_framework.views import APIView
 from montour.utils import api_response, api_error
+from montour.validators import sanitize_text
 from .models import ChatMessage
-from .serializers import ChatMessageSerializer
+from .serializers import ChatMessageSerializer, ChatInputSerializer
 
 logger = logging.getLogger('apps')
 
@@ -32,21 +33,23 @@ class ChatbotView(APIView):
     """
     POST /api/v1/chatbot/message/
     Envoie un message au chatbot (Rasa ou local).
-
     Body: { "message": "comment prendre un ticket ?" }
     """
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        message = request.data.get('message', '').strip()
-        if not message:
-            return api_error('Message vide.')
+        serializer = ChatInputSerializer(data=request.data)
+        if not serializer.is_valid():
+            return api_error('Message invalide', details=serializer.errors)
+
+        raw_message = serializer.validated_data['message']
+        clean_message = sanitize_text(raw_message, max_length=1000)
 
         ChatMessage.objects.create(
-            user=request.user, content=message, role='user'
+            user=request.user, content=clean_message, role='user'
         )
 
-        response_text = self._get_response(message, request.user)
+        response_text = self._get_response(clean_message, request.user)
 
         bot_msg = ChatMessage.objects.create(
             user=request.user, content=response_text, role='bot'
@@ -84,18 +87,20 @@ class ChatbotView(APIView):
 
 
 class ChatHistoryView(APIView):
-    """GET /api/v1/chatbot/history/ — Historique des messages du chatbot."""
+    """GET /api/v1/chatbot/history/ — Historique des messages du chatbot (RLS)."""
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        # RLS: un utilisateur ne peut voir que son historique
         messages = ChatMessage.objects.filter(user=request.user).order_by('created_at')[:50]
         return api_response(data=ChatMessageSerializer(messages, many=True).data)
 
 
 class ClearChatView(APIView):
-    """DELETE /api/v1/chatbot/clear/ — Effacer l'historique de discussion."""
+    """DELETE /api/v1/chatbot/clear/ — Effacer l'historique de discussion (RLS)."""
     permission_classes = [permissions.IsAuthenticated]
 
     def delete(self, request):
+        # RLS: un utilisateur n'efface que son historique
         ChatMessage.objects.filter(user=request.user).delete()
         return api_response(message='Historique effacé avec succès.')

@@ -1,6 +1,6 @@
 // ============================================================
 // MonTour Backend - server.js
-// Stack : Node.js + Express (simule l'API Django REST)
+// Stack : Node.js + Express (API REST avec validations et RLS)
 // Modules : Auth, Users, Files d'attente, Tickets, Stats, IA
 // ============================================================
 
@@ -40,7 +40,49 @@ DB.services.forEach(s => {
 });
 
 // ============================================================
-// MIDDLEWARE : Vérification JWT
+// VALIDATEURS ET SANITIZATION CÔTÉ SERVEUR
+// ============================================================
+const EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
+const PHONE_REGEX = /^(?:\+229)?[0-9]{8}$/;
+
+function sanitize(str) {
+  if (typeof str !== 'string') return '';
+  return str.replace(/[&<>"']/g, (match) => {
+    const escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#x27;' };
+    return escapeMap[match];
+  }).trim();
+}
+
+function validateEmail(email) {
+  if (!email || typeof email !== 'string') return { valid: false, message: 'Email requis' };
+  const clean = email.trim().toLowerCase();
+  if (clean.length > 254) return { valid: false, message: 'Email trop long (max 254 caractères)' };
+  if (!EMAIL_REGEX.test(clean)) return { valid: false, message: 'Format d\'email invalide' };
+  return { valid: true, value: clean };
+}
+
+function validatePassword(password) {
+  if (!password || typeof password !== 'string') return { valid: false, message: 'Mot de passe requis' };
+  if (password.length < 8) return { valid: false, message: 'Le mot de passe doit contenir au moins 8 caractères' };
+  if (password.length > 128) return { valid: false, message: 'Mot de passe trop long (max 128 caractères)' };
+  if (!/[A-Z]/.test(password)) return { valid: false, message: 'Au moins une lettre majuscule requise' };
+  if (!/[a-z]/.test(password)) return { valid: false, message: 'Au moins une lettre minuscule requise' };
+  if (!/\d/.test(password)) return { valid: false, message: 'Au moins un chiffre requis' };
+  if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?`~]/.test(password)) {
+    return { valid: false, message: 'Au moins un caractère spécial requis' };
+  }
+  return { valid: true };
+}
+
+function validatePhone(phone) {
+  if (!phone) return { valid: true, value: '' };
+  const clean = phone.replace(/[\s\-\.]/g, '');
+  if (!PHONE_REGEX.test(clean)) return { valid: false, message: 'Format de téléphone invalide (+229XXXXXXXX ou 8 chiffres)' };
+  return { valid: true, value: clean };
+}
+
+// ============================================================
+// MIDDLEWARES : Auth JWT et RLS (Row Level Security)
 // ============================================================
 function authMiddleware(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
@@ -53,24 +95,50 @@ function authMiddleware(req, res, next) {
   }
 }
 
+// RLS: Vérification des rôles autorisés
+function requireRole(...allowedRoles) {
+  return (req, res, next) => {
+    if (!req.user || !allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Accès non autorisé pour ce rôle' });
+    }
+    next();
+  };
+}
+
 // ============================================================
-// MODULE 1 : AUTHENTIFICATION (Firebase Auth simulé)
+// MODULE 1 : AUTHENTIFICATION
 // ============================================================
 // POST /api/auth/register
 app.post('/api/auth/register', async (req, res) => {
   const { username, email, phone, password, role } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'Champs requis manquants' });
-  if (DB.users.find(u => u.email === email)) return res.status(409).json({ error: 'Email déjà utilisé' });
+
+  const emailVal = validateEmail(email);
+  if (!emailVal.valid) return res.status(400).json({ error: emailVal.message });
+
+  const passVal = validatePassword(password);
+  if (!passVal.valid) return res.status(400).json({ error: passVal.message });
+
+  const phoneVal = validatePhone(phone);
+  if (!phoneVal.valid) return res.status(400).json({ error: phoneVal.message });
+
+  if (DB.users.find(u => u.email === emailVal.value)) {
+    return res.status(409).json({ error: 'Email déjà utilisé' });
+  }
+
+  const validRoles = ['user', 'agent', 'admin'];
+  const userRole = validRoles.includes(role) ? role : 'user';
 
   const hash = await bcrypt.hash(password, 10);
+  const cleanUsername = sanitize(username) || emailVal.value.split('@')[0];
+
   const user = {
     id: uuidv4(),
-    username: username || email.split('@')[0],
-    email,
-    phone: phone || '',
+    username: cleanUsername,
+    email: emailVal.value,
+    phone: phoneVal.value,
     password: hash,
-    role: role || 'user',   // 'user' | 'agent' | 'admin'
-    priority: 'normal',     // 'normal' | 'urgent' | 'handicap' | 'senior'
+    role: userRole,
+    priority: 'normal',
     createdAt: new Date().toISOString(),
   };
   DB.users.push(user);
@@ -84,17 +152,23 @@ app.post('/api/auth/register', async (req, res) => {
 // POST /api/auth/login
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
-  const user = DB.users.find(u => u.email === email);
-  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  if (!email || !password) return res.status(400).json({ error: 'Email et mot de passe requis' });
+
+  const emailVal = validateEmail(email);
+  if (!emailVal.valid) return res.status(400).json({ error: emailVal.message });
+
+  const user = DB.users.find(u => u.email === emailVal.value);
+  if (!user) return res.status(401).json({ error: 'Identifiants incorrects' });
+
   const valid = await bcrypt.compare(password, user.password);
-  if (!valid) return res.status(401).json({ error: 'Mot de passe incorrect' });
+  if (!valid) return res.status(401).json({ error: 'Identifiants incorrects' });
 
   const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
   const { password: _, ...userSafe } = user;
   res.json({ token, user: userSafe });
 });
 
-// GET /api/auth/me
+// GET /api/auth/me (RLS: son propre profil)
 app.get('/api/auth/me', authMiddleware, (req, res) => {
   const user = DB.users.find(u => u.id === req.user.id);
   if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
@@ -102,14 +176,35 @@ app.get('/api/auth/me', authMiddleware, (req, res) => {
   res.json(userSafe);
 });
 
-// PUT /api/auth/profile
+// PUT /api/auth/profile (RLS: modifier uniquement son propre profil)
 app.put('/api/auth/profile', authMiddleware, (req, res) => {
   const idx = DB.users.findIndex(u => u.id === req.user.id);
   if (idx === -1) return res.status(404).json({ error: 'Utilisateur introuvable' });
+
   const { username, phone, priority } = req.body;
-  if (username) DB.users[idx].username = username;
-  if (phone) DB.users[idx].phone = phone;
-  if (priority) DB.users[idx].priority = priority;
+
+  if (username !== undefined) {
+    const cleanU = sanitize(username);
+    if (cleanU.length < 3 || cleanU.length > 50) {
+      return res.status(400).json({ error: 'Le nom d\'utilisateur doit comporter entre 3 et 50 caractères' });
+    }
+    DB.users[idx].username = cleanU;
+  }
+
+  if (phone !== undefined) {
+    const phoneVal = validatePhone(phone);
+    if (!phoneVal.valid) return res.status(400).json({ error: phoneVal.message });
+    DB.users[idx].phone = phoneVal.value;
+  }
+
+  if (priority !== undefined) {
+    const validPriorities = ['normal', 'urgent', 'handicap', 'senior'];
+    if (!validPriorities.includes(priority)) {
+      return res.status(400).json({ error: 'Priorité invalide' });
+    }
+    DB.users[idx].priority = priority;
+  }
+
   const { password: _, ...userSafe } = DB.users[idx];
   res.json(userSafe);
 });
@@ -117,66 +212,54 @@ app.put('/api/auth/profile', authMiddleware, (req, res) => {
 // ============================================================
 // MODULE 2 : SERVICES
 // ============================================================
-// GET /api/services
 app.get('/api/services', authMiddleware, (req, res) => {
   const result = DB.services.map(s => ({
     ...s,
-    queueLength: DB.queues[s.id].tickets.filter(t => t.status === 'waiting').length,
-    status: DB.queues[s.id].status,
-    currentNumber: DB.queues[s.id].calledNumber,
+    queueLength: DB.queues[s.id]?.tickets.filter(t => t.status === 'waiting').length || 0,
+    status: DB.queues[s.id]?.status || 'closed',
+    currentNumber: DB.queues[s.id]?.calledNumber || 0,
   }));
   res.json(result);
 });
 
-// GET /api/services/:id
 app.get('/api/services/:id', authMiddleware, (req, res) => {
   const s = DB.services.find(s => s.id === req.params.id);
   if (!s) return res.status(404).json({ error: 'Service introuvable' });
   const q = DB.queues[s.id];
   res.json({
     ...s,
-    queueLength: q.tickets.filter(t => t.status === 'waiting').length,
-    status: q.status,
-    currentNumber: q.calledNumber,
-    tickets: q.tickets,
+    queueLength: q ? q.tickets.filter(t => t.status === 'waiting').length : 0,
+    status: q ? q.status : 'closed',
+    currentNumber: q ? q.calledNumber : 0,
+    tickets: q ? q.tickets : [],
   });
 });
 
 // ============================================================
-// MODULE 3 : TICKETS / FILE D'ATTENTE
+// MODULE 3 : TICKETS / FILE D'ATTENTE (avec RLS)
 // ============================================================
-
-// Fonction IA : Prédiction du temps d'attente (TFLite simulé)
 function predictWaitTime(serviceId, positionInQueue, userPriority) {
   const service = DB.services.find(s => s.id === serviceId);
   if (!service) return 0;
 
   const base = service.avgServiceTime;
-  // Facteur contextuel (heure de la journée)
   const hour = new Date().getHours();
   let peakFactor = 1.0;
-  if (hour >= 8 && hour <= 10) peakFactor = 1.5;       // Pointe matin
-  else if (hour >= 11 && hour <= 13) peakFactor = 1.3;  // Avant-midi
-  else if (hour >= 15 && hour <= 17) peakFactor = 1.4;  // Pointe soir
+  if (hour >= 8 && hour <= 10) peakFactor = 1.5;
+  else if (hour >= 11 && hour <= 13) peakFactor = 1.3;
+  else if (hour >= 15 && hour <= 17) peakFactor = 1.4;
 
-  // Facteur priorité
   const priorityBonus = { urgent: 0.3, handicap: 0.5, senior: 0.7, normal: 1.0 };
   const pFactor = priorityBonus[userPriority] || 1.0;
 
-  // Position effective
   const effectivePos = Math.max(1, positionInQueue * pFactor);
   const estimated = Math.round(effectivePos * base * peakFactor);
-
-  // Bruit aléatoire ±15%
-  const noise = 1 + (Math.random() * 0.3 - 0.15);
-  return Math.max(1, Math.round(estimated * noise));
+  return Math.max(1, estimated);
 }
 
-// Fonction IA : Score de priorité dynamique
 function computePriorityScore(user, requestedAt) {
   const scores = { urgent: 100, handicap: 80, senior: 60, normal: 40 };
-  const base = scores[user.priority] || 40;
-  // Bonus temps d'attente (+ 1 pt par minute d'attente)
+  const base = scores[user?.priority] || 40;
   const waitedMin = (Date.now() - new Date(requestedAt).getTime()) / 60000;
   return base + Math.floor(waitedMin);
 }
@@ -188,7 +271,6 @@ app.post('/api/queues/:serviceId/take-ticket', authMiddleware, (req, res) => {
   if (!queue) return res.status(404).json({ error: 'File introuvable' });
   if (queue.status === 'closed') return res.status(400).json({ error: 'Ce service est fermé' });
 
-  // Vérifier si l'utilisateur a déjà un ticket actif dans cette file
   const existing = queue.tickets.find(t => t.userId === req.user.id && t.status === 'waiting');
   if (existing) return res.status(409).json({ error: 'Vous avez déjà un ticket actif', ticket: existing });
 
@@ -202,7 +284,7 @@ app.post('/api/queues/:serviceId/take-ticket', authMiddleware, (req, res) => {
     userId: req.user.id,
     userName: user?.username || 'Anonyme',
     userPriority: user?.priority || 'normal',
-    status: 'waiting',   // 'waiting' | 'called' | 'served' | 'cancelled'
+    status: 'waiting',
     requestedAt: new Date().toISOString(),
     calledAt: null,
     servedAt: null,
@@ -210,11 +292,8 @@ app.post('/api/queues/:serviceId/take-ticket', authMiddleware, (req, res) => {
     priorityScore: 0,
   };
 
-  // Calcul position et temps d'attente
-  const waitingCount = queue.tickets.filter(t => t.status === 'waiting').length;
   ticket.priorityScore = computePriorityScore(user, ticket.requestedAt);
 
-  // Tri de la file par score décroissant pour calculer la position réelle
   const sortedWaiting = [...queue.tickets.filter(t => t.status === 'waiting'), ticket]
     .sort((a, b) => b.priorityScore - a.priorityScore);
   const myPos = sortedWaiting.findIndex(t => t.id === ticket.id) + 1;
@@ -223,7 +302,6 @@ app.post('/api/queues/:serviceId/take-ticket', authMiddleware, (req, res) => {
   queue.tickets.push(ticket);
   DB.tickets.push(ticket);
 
-  // Notification push simulée
   if (!DB.notifications[req.user.id]) DB.notifications[req.user.id] = [];
   DB.notifications[req.user.id].push({
     id: uuidv4(),
@@ -247,7 +325,6 @@ app.get('/api/queues/:serviceId', authMiddleware, (req, res) => {
   const waiting = queue.tickets.filter(t => t.status === 'waiting')
     .sort((a, b) => b.priorityScore - a.priorityScore);
 
-  // Recalculer les estimations
   waiting.forEach((t, idx) => {
     t.estimatedWait = predictWaitTime(serviceId, idx + 1, t.userPriority);
   });
@@ -261,8 +338,8 @@ app.get('/api/queues/:serviceId', authMiddleware, (req, res) => {
   });
 });
 
-// POST /api/queues/:serviceId/call-next  (Agent/Admin)
-app.post('/api/queues/:serviceId/call-next', authMiddleware, (req, res) => {
+// POST /api/queues/:serviceId/call-next (RLS: Agent/Admin)
+app.post('/api/queues/:serviceId/call-next', authMiddleware, requireRole('agent', 'admin'), (req, res) => {
   const { serviceId } = req.params;
   const queue = DB.queues[serviceId];
   if (!queue) return res.status(404).json({ error: 'File introuvable' });
@@ -278,7 +355,6 @@ app.post('/api/queues/:serviceId/call-next', authMiddleware, (req, res) => {
   next.calledAt = new Date().toISOString();
   queue.calledNumber = next.number;
 
-  // Notification pour l'utilisateur appelé
   if (!DB.notifications[next.userId]) DB.notifications[next.userId] = [];
   DB.notifications[next.userId].push({
     id: uuidv4(),
@@ -292,8 +368,8 @@ app.post('/api/queues/:serviceId/call-next', authMiddleware, (req, res) => {
   res.json({ calledTicket: next });
 });
 
-// POST /api/queues/:serviceId/serve/:ticketId  (Agent)
-app.post('/api/queues/:serviceId/serve/:ticketId', authMiddleware, (req, res) => {
+// POST /api/queues/:serviceId/serve/:ticketId (RLS: Agent/Admin)
+app.post('/api/queues/:serviceId/serve/:ticketId', authMiddleware, requireRole('agent', 'admin'), (req, res) => {
   const { serviceId, ticketId } = req.params;
   const queue = DB.queues[serviceId];
   const ticket = queue?.tickets.find(t => t.id === ticketId);
@@ -302,7 +378,6 @@ app.post('/api/queues/:serviceId/serve/:ticketId', authMiddleware, (req, res) =>
   ticket.status = 'served';
   ticket.servedAt = new Date().toISOString();
 
-  // Stats
   DB.stats.push({
     serviceId,
     ticketId,
@@ -313,19 +388,19 @@ app.post('/api/queues/:serviceId/serve/:ticketId', authMiddleware, (req, res) =>
   res.json({ ticket });
 });
 
-// DELETE /api/queues/:serviceId/cancel/:ticketId
+// DELETE /api/queues/:serviceId/cancel/:ticketId (RLS: Propriétaire du ticket)
 app.delete('/api/queues/:serviceId/cancel/:ticketId', authMiddleware, (req, res) => {
   const { serviceId, ticketId } = req.params;
   const queue = DB.queues[serviceId];
   const ticket = queue?.tickets.find(t => t.id === ticketId && t.userId === req.user.id);
-  if (!ticket) return res.status(404).json({ error: 'Ticket introuvable' });
+  if (!ticket) return res.status(404).json({ error: 'Ticket introuvable ou vous n\'en êtes pas le propriétaire' });
   if (ticket.status !== 'waiting') return res.status(400).json({ error: 'Impossible d\'annuler ce ticket' });
 
   ticket.status = 'cancelled';
-  res.json({ message: 'Ticket annulé', ticket });
+  res.json({ message: 'Ticket annulé avec succès', ticket });
 });
 
-// GET /api/my-tickets  (Historique utilisateur)
+// GET /api/my-tickets (RLS: Historique personnel)
 app.get('/api/my-tickets', authMiddleware, (req, res) => {
   const userTickets = DB.tickets.filter(t => t.userId === req.user.id)
     .sort((a, b) => new Date(b.requestedAt) - new Date(a.requestedAt));
@@ -333,7 +408,7 @@ app.get('/api/my-tickets', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// MODULE 4 : NOTIFICATIONS (Firebase Cloud Messaging simulé)
+// MODULE 4 : NOTIFICATIONS (RLS)
 // ============================================================
 app.get('/api/notifications', authMiddleware, (req, res) => {
   const notifs = DB.notifications[req.user.id] || [];
@@ -347,9 +422,9 @@ app.put('/api/notifications/read-all', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// MODULE 5 : STATISTIQUES (Admin)
+// MODULE 5 : STATISTIQUES (RLS: Agent/Admin)
 // ============================================================
-app.get('/api/stats', authMiddleware, (req, res) => {
+app.get('/api/stats', authMiddleware, requireRole('agent', 'admin'), (req, res) => {
   const totalTickets = DB.tickets.length;
   const served = DB.tickets.filter(t => t.status === 'served').length;
   const cancelled = DB.tickets.filter(t => t.status === 'cancelled').length;
@@ -365,7 +440,7 @@ app.get('/api/stats', authMiddleware, (req, res) => {
     name: s.name,
     total: DB.tickets.filter(t => t.serviceId === s.id).length,
     served: DB.tickets.filter(t => t.serviceId === s.id && t.status === 'served').length,
-    waiting: DB.queues[s.id].tickets.filter(t => t.status === 'waiting').length,
+    waiting: DB.queues[s.id]?.tickets.filter(t => t.status === 'waiting').length || 0,
   }));
 
   const byPriority = ['urgent', 'handicap', 'senior', 'normal'].map(p => ({
@@ -377,7 +452,7 @@ app.get('/api/stats', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// MODULE 6 : CHATBOT (Rasa simulé)
+// MODULE 6 : CHATBOT
 // ============================================================
 const chatbotResponses = {
   bonjour: 'Bonjour ! Je suis l\'assistant MonTour. Comment puis-je vous aider ? Vous pouvez me demander : votre position, le temps d\'attente, ou comment réserver un ticket.',
@@ -392,29 +467,31 @@ const chatbotResponses = {
 
 app.post('/api/chatbot', authMiddleware, (req, res) => {
   const { message } = req.body;
-  if (!message) return res.status(400).json({ error: 'Message requis' });
+  if (!message || typeof message !== 'string') return res.status(400).json({ error: 'Message requis' });
 
-  const lower = message.toLowerCase();
+  const cleanMessage = sanitize(message);
+  if (cleanMessage.length > 1000) return res.status(400).json({ error: 'Message trop long (max 1000 caractères)' });
+
+  const lower = cleanMessage.toLowerCase();
   let response = chatbotResponses.default;
 
   for (const [key, val] of Object.entries(chatbotResponses)) {
     if (lower.includes(key)) { response = val; break; }
   }
 
-  // Délai simulé pour l'effet de frappe
   setTimeout(() => {
     res.json({
       message: response,
       timestamp: new Date().toISOString(),
       intent: Object.keys(chatbotResponses).find(k => lower.includes(k)) || 'unknown',
     });
-  }, 500);
+  }, 200);
 });
 
 // ============================================================
-// MODULE 7 : ADMIN - Gestion des services et des files
+// MODULE 7 : ADMIN (RLS: Admin)
 // ============================================================
-app.put('/api/admin/queues/:serviceId/toggle', authMiddleware, (req, res) => {
+app.put('/api/admin/queues/:serviceId/toggle', authMiddleware, requireRole('admin'), (req, res) => {
   const { serviceId } = req.params;
   const queue = DB.queues[serviceId];
   if (!queue) return res.status(404).json({ error: 'File introuvable' });
@@ -422,7 +499,7 @@ app.put('/api/admin/queues/:serviceId/toggle', authMiddleware, (req, res) => {
   res.json({ serviceId, status: queue.status });
 });
 
-app.get('/api/admin/users', authMiddleware, (req, res) => {
+app.get('/api/admin/users', authMiddleware, requireRole('admin'), (req, res) => {
   const users = DB.users.map(({ password: _, ...u }) => u);
   res.json(users);
 });
@@ -434,23 +511,8 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', version: '1.0.0', app: 'MonTour API', timestamp: new Date().toISOString() });
 });
 
-// ============================================================
-// DÉMARRAGE
-// ============================================================
 app.listen(PORT, () => {
   console.log(`\n🚀 MonTour API démarrée sur http://localhost:${PORT}`);
-  console.log(`📋 Routes disponibles :`);
-  console.log(`   POST /api/auth/register`);
-  console.log(`   POST /api/auth/login`);
-  console.log(`   GET  /api/auth/me`);
-  console.log(`   GET  /api/services`);
-  console.log(`   POST /api/queues/:id/take-ticket`);
-  console.log(`   GET  /api/queues/:id`);
-  console.log(`   GET  /api/my-tickets`);
-  console.log(`   GET  /api/notifications`);
-  console.log(`   GET  /api/stats`);
-  console.log(`   POST /api/chatbot`);
-  console.log(`   GET  /api/health\n`);
 });
 
 module.exports = app;

@@ -7,6 +7,7 @@ from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
 
 from montour.utils import api_response, api_error
+from montour.permissions import IsAdminUser, IsAgentOrAdmin
 from .models import Queue
 from .serializers import QueueSerializer
 
@@ -35,12 +36,10 @@ class QueueListView(ListAPIView):
 
 
 class QueueToggleView(APIView):
-    """POST /api/v1/queues/<queue_id>/toggle/ — Ouvrir/Fermer."""
-    permission_classes = [permissions.IsAuthenticated]
+    """POST /api/v1/queues/<queue_id>/toggle/ — Ouvrir/Fermer (Agent/Admin)."""
+    permission_classes = [permissions.IsAuthenticated, IsAgentOrAdmin]
 
     def post(self, request, queue_id):
-        if not (request.user.is_admin or request.user.is_agent):
-            return api_error('Permission refusée.', 403)
         try:
             queue = Queue.objects.get(pk=queue_id)
         except Queue.DoesNotExist:
@@ -57,11 +56,9 @@ class QueueToggleView(APIView):
 
 class QueueResetView(APIView):
     """POST /api/v1/queues/<queue_id>/reset/ — Réinitialiser (Admin)."""
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsAdminUser]
 
     def post(self, request, queue_id):
-        if not request.user.is_admin:
-            return api_error('Permission refusée.', 403)
         try:
             queue = Queue.objects.get(pk=queue_id)
         except Queue.DoesNotExist:
@@ -71,4 +68,4 @@ class QueueResetView(APIView):
         queue.current_number = 0
         queue.called_number  = 0
         queue.save(update_fields=['current_number', 'called_number'])
-        return api_response(message='File réinitialisée.')
+        return api_response(message='File réinitialisée avec succès.')
