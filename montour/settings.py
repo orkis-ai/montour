@@ -15,7 +15,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # ─── Sécurité ────────────────────────────────────────────────
 SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-montour-change-in-prod-2025')
 DEBUG = os.getenv('DEBUG', 'True') == 'True'
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+
+# Autoriser localhost, IPs locales et domaines Vercel
+raw_hosts = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,.vercel.app,*')
+ALLOWED_HOSTS = [h.strip() for h in raw_hosts.split(',') if h.strip()]
 
 # ─── Applications installées ─────────────────────────────────
 DJANGO_APPS = [
@@ -52,6 +55,7 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',    # CORS en premier
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware', # Fichiers statiques (Vercel/Prod)
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -80,16 +84,18 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'montour.wsgi.application'
 
-# Create logs directory if it does not exist
-LOGS_DIR = BASE_DIR / 'logs'
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-
 # ─── Base de données (SQLite par défaut si env USE_SQLITE est True ou si Postgres non configuré) ───────
 if os.getenv('USE_SQLITE', 'True').lower() in ('true', '1', 'yes'):
+    # Sur Vercel (serverless lambda), seul /tmp est accessible en écriture
+    if os.getenv('VERCEL') or os.getenv('AWS_LAMBDA_FUNCTION_NAME'):
+        sqlite_db = Path('/tmp') / 'db.sqlite3'
+    else:
+        sqlite_db = BASE_DIR / 'db.sqlite3'
+
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
+            'NAME': sqlite_db,
         }
     }
 else:
@@ -127,6 +133,8 @@ USE_TZ = True
 # ─── Fichiers statiques et media ─────────────────────────────
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
@@ -183,11 +191,7 @@ SIMPLE_JWT = {
 }
 
 # ─── CORS (Cross-Origin Resource Sharing) ────────────────────
-CORS_ALLOWED_ORIGINS = [
-    'http://localhost:3000',      # React dev
-    'http://localhost:8080',      # Flutter web dev
-    'http://127.0.0.1:3000',
-]
+CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = [
     'accept', 'accept-encoding', 'authorization',
@@ -195,28 +199,13 @@ CORS_ALLOW_HEADERS = [
     'x-csrftoken', 'x-requested-with',
 ]
 
-# ─── Cache (Redis recommandé en prod) ────────────────────────
+# ─── Cache ───────────────────────────────────────────────────
 CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
         'LOCATION': 'montour-cache',
     }
 }
-# En production avec Redis :
-# CACHES = {
-#     'default': {
-#         'BACKEND': 'django_redis.cache.RedisCache',
-#         'LOCATION': os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/1'),
-#     }
-# }
-
-# ─── Channels (WebSocket pour temps réel) ────────────────────
-# CHANNEL_LAYERS = {
-#     'default': {
-#         'BACKEND': 'channels_redis.core.RedisChannelLayer',
-#         'CONFIG': {'hosts': [os.getenv('REDIS_URL', 'redis://127.0.0.1:6379')]},
-#     }
-# }
 
 # ─── Firebase (Cloud Messaging pour notifications push) ───────
 FIREBASE_SERVER_KEY = os.getenv('FIREBASE_SERVER_KEY', '')
@@ -232,7 +221,17 @@ EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
 DEFAULT_FROM_EMAIL = 'MonTour <noreply@montour.bj>'
 
-# ─── Logging ─────────────────────────────────────────────────
+# ─── Logging (compatible environnements serverless read-only) ──
+LOGS_DIR = BASE_DIR / 'logs'
+has_file_logging = False
+
+try:
+    if not (os.getenv('VERCEL') or os.getenv('AWS_LAMBDA_FUNCTION_NAME')):
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        has_file_logging = True
+except OSError:
+    has_file_logging = False
+
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
@@ -242,18 +241,21 @@ LOGGING = {
     },
     'handlers': {
         'console': {'class': 'logging.StreamHandler', 'formatter': 'verbose'},
-        'file': {
-            'class': 'logging.FileHandler',
-            'filename': BASE_DIR / 'logs' / 'montour.log',
-            'formatter': 'verbose',
-        },
     },
     'root': {'handlers': ['console'], 'level': 'INFO'},
     'loggers': {
-        'apps': {'handlers': ['console', 'file'], 'level': 'DEBUG', 'propagate': False},
+        'apps': {'handlers': ['console'], 'level': 'DEBUG', 'propagate': False},
         'django.request': {'handlers': ['console'], 'level': 'ERROR'},
     },
 }
+
+if has_file_logging:
+    LOGGING['handlers']['file'] = {
+        'class': 'logging.FileHandler',
+        'filename': LOGS_DIR / 'montour.log',
+        'formatter': 'verbose',
+    }
+    LOGGING['loggers']['apps']['handlers'].append('file')
 
 # ─── API Documentation (drf-spectacular) ─────────────────────
 SPECTACULAR_SETTINGS = {
