@@ -3,17 +3,17 @@ name = "montour"
 version = "1.0.0"
 description = "MonTour - Système intelligent de gestion des files d'attente au Bénin"
 readme = "readme.md"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 dependencies = [
-    "Django>=5.1,<6.0",
-    "djangorestframework>=3.15.1",
-    "djangorestframework-simplejwt>=5.3.1",
-    "django-cors-headers>=4.3.1",
-    "django-filter>=23.5",
-    "drf-spectacular>=0.27.1",
-    "python-dotenv>=1.0.1",
+    "Django>=4.2,<6.0",
+    "djangorestframework>=3.14.0",
+    "djangorestframework-simplejwt>=5.3.0",
+    "django-cors-headers>=4.3.0",
+    "django-filter>=23.0",
+    "drf-spectacular>=0.27.0",
+    "python-dotenv>=1.0.0",
     "requests>=2.31.0",
-    "Pillow>=10.2.0",
+    "Pillow>=10.0.0",
     "whitenoise>=6.6.0",
     "gunicorn>=21.2.0"
 ]
@@ -21,3 +21,8 @@ dependencies = [
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["montour*", "apps*"]
+exclude = ["backend*", "frontend*", "templates*", "logs*", "sql*", "staticfiles*"]
