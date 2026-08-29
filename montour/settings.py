@@ -92,6 +92,10 @@ WSGI_APPLICATION = 'montour.wsgi.application'
 DATABASE_URL = os.getenv('DATABASE_URL') or os.getenv('POSTGRES_URL')
 
 if DATABASE_URL:
+    # connect_timeout court : si la base est injoignable (mauvaise URL,
+    # pare-feu...), on échoue vite plutôt que de laisser la fonction
+    # serverless bloquée jusqu'au timeout de la plateforme (ce qui se
+    # traduit par un crash total plutôt qu'une page d'erreur Django propre).
     try:
         import dj_database_url
         DATABASES = {
@@ -101,6 +105,7 @@ if DATABASE_URL:
                 conn_health_checks=True,
             )
         }
+        DATABASES['default'].setdefault('OPTIONS', {})['connect_timeout'] = 5
     except ImportError:
         import urllib.parse
         url = urllib.parse.urlparse(DATABASE_URL)
@@ -112,6 +117,7 @@ if DATABASE_URL:
                 'PASSWORD': url.password,
                 'HOST': url.hostname,
                 'PORT': url.port or 5432,
+                'OPTIONS': {'connect_timeout': 5},
             }
         }
 elif os.getenv('USE_SQLITE', 'True').lower() in ('true', '1', 'yes') and not os.getenv('DB_HOST'):
@@ -160,32 +166,24 @@ USE_I18N = True
 USE_TZ = True
 
 # ─── Fichiers statiques et media ─────────────────────────────
-# On y écrit les fichiers collectés (voir wsgi.py qui lance collectstatic au
-# démarrage sur Vercel), sans quoi WhiteNoise n'a rien à servir (admin,
-# Swagger UI cassés en prod alors qu'ils fonctionnent en local).
+# Pas d'étape de build sur Vercel (pas de buildCommand dans vercel.json) et
+# filesystem du projet en lecture seule : on ne peut pas compter sur
+# `collectstatic` ayant tourné (le lancer au démarrage de chaque cold start
+# était trop lent/risqué — timeouts). WHITENOISE_USE_FINDERS fait servir à
+# WhiteNoise les fichiers statiques (admin, DRF browsable API) directement
+# depuis les dossiers static/ des apps installées, sans copie ni build.
 STATIC_URL = '/static/'
 STATIC_ROOT = Path('/tmp/staticfiles') if IS_VERCEL else BASE_DIR / 'staticfiles'
+WHITENOISE_USE_FINDERS = True
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = Path('/tmp/media') if IS_VERCEL else BASE_DIR / 'media'
 
 # PWA (favicons, manifest.json, service worker) : servis à la racine du site
-# (ex. /manifest.json, /sw.js) sans passer par collectstatic, donc lisibles
-# même si le filesystem est en lecture seule (Vercel) ou avant tout build.
+# (ex. /manifest.json, /sw.js), là aussi directement depuis le disque.
 # `public/` n'a jamais été relié à aucune route HTTP jusqu'ici (ces fichiers
 # vivaient dans templates/, un dossier que Django ne sert jamais en HTTP).
 WHITENOISE_ROOT = BASE_DIR / 'public'
-
-# Django >=5.1 ignore l'ancien réglage STATICFILES_STORAGE : il faut passer par
-# STORAGES pour que WhiteNoise compresse et hash bien les fichiers statiques.
-STORAGES = {
-    'default': {
-        'BACKEND': 'django.core.files.storage.FileSystemStorage',
-    },
-    'staticfiles': {
-        'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
-    },
-}
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
