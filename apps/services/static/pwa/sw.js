@@ -1,10 +1,9 @@
 const CACHE_NAME = "montour-cache-v1";
 const CORE_ASSETS = [
-    "./",
-    "./index.html",
-    "./manifest.json",
-    "./icons/icon-192.png",
-    "./icons/icon-512.png",
+    "/",
+    "/manifest.json",
+    "/static/icons/icon-192.png",
+    "/static/icons/icon-512.png",
 ];
 
 // Installation : met en cache les fichiers essentiels de l'application
@@ -41,7 +40,7 @@ self.addEventListener("fetch", (event) => {
                 return response;
             })
             .catch(() =>
-                caches.match(event.request).then((cached) => cached || caches.match("./index.html"))
+                caches.match(event.request).then((cached) => cached || caches.match("/"))
             )
     );
 });

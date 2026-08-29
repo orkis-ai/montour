@@ -15,9 +15,15 @@ from drf_spectacular.views import (
 )
 from rest_framework_simplejwt.views import TokenRefreshView
 
+from montour.pwa_views import manifest, service_worker
+
 urlpatterns = [
     # ── Application Web Frontend ───────────────────────────────
     path('', TemplateView.as_view(template_name='index.html'), name='home'),
+
+    # ── PWA (manifest, service worker) ─────────────────────────
+    path('manifest.json', manifest, name='pwa-manifest'),
+    path('sw.js', service_worker, name='pwa-service-worker'),
 
     # ── Administration Django ──────────────────────────────────
     path('admin/', admin.site.urls),

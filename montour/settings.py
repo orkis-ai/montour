@@ -179,12 +179,6 @@ WHITENOISE_USE_FINDERS = True
 MEDIA_URL = '/media/'
 MEDIA_ROOT = Path('/tmp/media') if IS_VERCEL else BASE_DIR / 'media'
 
-# PWA (favicons, manifest.json, service worker) : servis à la racine du site
-# (ex. /manifest.json, /sw.js), là aussi directement depuis le disque.
-# `public/` n'a jamais été relié à aucune route HTTP jusqu'ici (ces fichiers
-# vivaient dans templates/, un dossier que Django ne sert jamais en HTTP).
-WHITENOISE_ROOT = BASE_DIR / 'public'
-
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # ─── Django REST Framework ────────────────────────────────────
