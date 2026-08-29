@@ -16,6 +16,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-montour-change-in-prod-2025')
 DEBUG = os.getenv('DEBUG', 'True') == 'True'
 
+# Vercel : système de fichiers du projet en lecture seule, seul /tmp est
+# inscriptible (voir la config des fichiers statiques/media/DB plus bas).
+IS_VERCEL = bool(os.getenv('VERCEL'))
+
 # Autoriser localhost, IPs locales et domaines Vercel
 raw_hosts = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,.vercel.app,*')
 ALLOWED_HOSTS = [h.strip() for h in raw_hosts.split(',') if h.strip()]
@@ -111,7 +115,12 @@ if DATABASE_URL:
             }
         }
 elif os.getenv('USE_SQLITE', 'True').lower() in ('true', '1', 'yes') and not os.getenv('DB_HOST'):
-    sqlite_db = BASE_DIR / 'db.sqlite3'
+    # Filet de sécurité : si DATABASE_URL/POSTGRES_URL n'est pas configuré sur
+    # Vercel, on écrit au moins dans /tmp plutôt que de crasher sur le
+    # filesystem du projet qui est en lecture seule (données non persistées
+    # entre invocations, mais l'app reste fonctionnelle en attendant qu'un
+    # vrai Postgres soit branché).
+    sqlite_db = Path('/tmp/db.sqlite3') if IS_VERCEL else BASE_DIR / 'db.sqlite3'
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
@@ -151,12 +160,25 @@ USE_I18N = True
 USE_TZ = True
 
 # ─── Fichiers statiques et media ─────────────────────────────
+# On y écrit les fichiers collectés (voir wsgi.py qui lance collectstatic au
+# démarrage sur Vercel), sans quoi WhiteNoise n'a rien à servir (admin,
+# Swagger UI cassés en prod alors qu'ils fonctionnent en local).
 STATIC_URL = '/static/'
-STATIC_ROOT = BASE_DIR / 'staticfiles'
-STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+STATIC_ROOT = Path('/tmp/staticfiles') if IS_VERCEL else BASE_DIR / 'staticfiles'
 
 MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_ROOT = Path('/tmp/media') if IS_VERCEL else BASE_DIR / 'media'
+
+# Django >=5.1 ignore l'ancien réglage STATICFILES_STORAGE : il faut passer par
+# STORAGES pour que WhiteNoise compresse et hash bien les fichiers statiques.
+STORAGES = {
+    'default': {
+        'BACKEND': 'django.core.files.storage.FileSystemStorage',
+    },
+    'staticfiles': {
+        'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
+    },
+}
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
@@ -246,7 +268,7 @@ LOGS_DIR = BASE_DIR / 'logs'
 has_file_logging = False
 
 try:
-    if not (os.getenv('VERCEL') or os.getenv('AWS_LAMBDA_FUNCTION_NAME')):
+    if not (IS_VERCEL or os.getenv('AWS_LAMBDA_FUNCTION_NAME')):
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         has_file_logging = True
 except OSError:
