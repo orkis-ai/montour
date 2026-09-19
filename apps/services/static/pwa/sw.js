@@ -1,4 +1,4 @@
-const CACHE_NAME = "montour-cache-v1";
+const CACHE_NAME = "montour-cache-v2";
 const CORE_ASSETS = [
     "/",
     "/manifest.json",
@@ -32,11 +32,19 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
     if (event.request.method !== "GET") return;
 
+    const url = new URL(event.request.url);
+    // Jamais de cache pour l'API : ses réponses sont privées (profil, tickets…) et
+    // seraient resservies à un autre compte sur le même appareil, ou périmées.
+    if (url.origin !== self.location.origin || url.pathname.startsWith("/api/")) return;
+
     event.respondWith(
         fetch(event.request)
             .then((response) => {
-                const clone = response.clone();
-                caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+                // On ne met en cache que les réponses réussies (pas d'erreurs 4xx/5xx)
+                if (response.ok) {
+                    const clone = response.clone();
+                    caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+                }
                 return response;
             })
             .catch(() =>

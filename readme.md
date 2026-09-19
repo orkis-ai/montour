@@ -11,101 +11,77 @@ MonTour est une application mobile intelligente basée sur l'IA pour la gestion 
 ## 🏗️ Architecture du Projet
 
 ```
-MonTour/
-├── backend/              # API REST (Node.js/Express — simule Django)
-│   ├── server.js         # Serveur principal avec tous les modules
-│   └── package.json      # Dépendances backend
-│
-└── frontend/             # Application React (simule Flutter)
-    └── MonTour_App.jsx   # Application complète (toutes les pages)
+montour/
+├── manage.py, montour/     # Projet Django (settings, urls, utilitaires)
+├── apps/
+│   ├── accounts/           # Utilisateurs, JWT, confirmation d'email, mot de passe oublié
+│   ├── services/ queues/ tickets/   # Services, files d'attente, tickets
+│   ├── notifications/ chatbot/ stats/
+├── templates/index.html    # Application web (React via Babel, servie par Django, PWA)
+├── seed.py                 # Données de démonstration (développement)
+└── .env.example            # Variables d'environnement à configurer
 ```
 
 ## 🔧 Stack Technologique
 
-| Composant        | Technologies utilisées                          |
-|------------------|-------------------------------------------------|
-| **Frontend**     | React (simule Flutter) + Hooks + localStorage   |
-| **Backend**      | Node.js + Express (simule Django REST Framework)|
-| **Auth**         | JWT + bcryptjs (simule Firebase Authentication) |
-| **Base données** | In-memory + localStorage (simule PostgreSQL)    |
-| **IA/ML**        | Algorithme prédictif intégré (simule TFLite)    |
-| **Chatbot**      | NLP basé sur règles (simule Rasa)               |
-| **Notifs**       | Système push intégré (simule Firebase FCM)      |
+| Composant        | Technologies utilisées                                     |
+|------------------|------------------------------------------------------------|
+| **Frontend**     | React (page unique `templates/index.html`) + PWA           |
+| **Backend**      | Django + Django REST Framework                             |
+| **Auth**         | JWT (SimpleJWT), confirmation d'email obligatoire          |
+| **Base données** | PostgreSQL en production (`DATABASE_URL`), SQLite en local |
+| **IA/ML**        | Algorithme prédictif intégré (simule TFLite)               |
+| **Chatbot**      | NLP basé sur règles (simule Rasa)                          |
+
+> Les tickets, files et notifications de l'interface web sont encore stockés dans le
+> navigateur (`localStorage`) ; seuls les comptes passent par l'API.
 
 ---
 
 ## 🚀 Démarrage Rapide
 
-### Backend (API)
-
 ```bash
-# 1. Installer les dépendances
-cd backend
-npm install
-
-# 2. Lancer le serveur
-node server.js
-# → API disponible sur http://localhost:4000
+python -m venv .venv && .venv\Scripts\activate      # Windows (source .venv/bin/activate sous Linux/macOS)
+pip install -r requirements.txt
+python manage.py migrate
+python seed.py                                        # optionnel : comptes et services de démonstration
+python manage.py runserver
+# → application sur http://localhost:8000 , API sur /api/v1/ , documentation sur /api/docs/
 ```
 
-### Frontend (React)
+Tests : `python manage.py test`
 
-```bash
-# Créer un projet React
-npx create-react-app montour-app
-cd montour-app
+### Configuration
 
-# Copier MonTour_App.jsx dans src/App.jsx
-cp MonTour_App.jsx src/App.jsx
-
-# Lancer l'app
-npm start
-# → App disponible sur http://localhost:3000
-```
+Copiez `.env.example` en `.env` et renseignez au minimum, **en production** :
+`SECRET_KEY`, `DATABASE_URL` (sans quoi les données sont perdues sur Vercel — voir `/api/health/`)
+et `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` (sans SMTP, aucun email de confirmation n'est délivré).
+En local, sans SMTP, les emails s'affichent dans la console du serveur : le lien de confirmation s'y copie.
 
 ---
 
-## 📡 API Endpoints
+## 📡 API
 
-### 🔐 Authentification
-| Méthode | Route              | Description                    |
-|---------|--------------------|--------------------------------|
-| POST    | /api/auth/register | Créer un compte                |
-| POST    | /api/auth/login    | Se connecter                   |
-| GET     | /api/auth/me       | Profil de l'utilisateur        |
-| PUT     | /api/auth/profile  | Mettre à jour le profil        |
+Documentation interactive complète : **`/api/docs/`** (Swagger) ou `/api/redoc/`.
 
-### 🏛️ Services
-| Méthode | Route             | Description                    |
-|---------|-------------------|--------------------------------|
-| GET     | /api/services     | Liste tous les services        |
-| GET     | /api/services/:id | Détail d'un service            |
+### 🔐 Authentification (`/api/v1/auth/`)
+| Méthode | Route                    | Description                                              |
+|---------|--------------------------|----------------------------------------------------------|
+| POST    | `register/`              | Créer un compte (inactif) et envoyer l'email de confirmation |
+| POST    | `verify-email/`          | Confirmer l'adresse avec le token reçu → renvoie les JWT |
+| POST    | `resend-verification/`   | Renvoyer l'email de confirmation                         |
+| POST    | `login/`                 | Se connecter (403 tant que l'email n'est pas confirmé)   |
+| POST    | `logout/`                | Révoquer le refresh token                                |
+| POST    | `token/refresh/`         | Renouveler l'access token                                |
+| GET/PUT | `me/`                    | Profil de l'utilisateur connecté                         |
+| POST    | `change-password/`       | Changer son mot de passe                                 |
+| POST    | `forgot-password/`       | Recevoir un lien de réinitialisation (valable 2 h)       |
+| POST    | `reset-password/`        | Choisir un nouveau mot de passe avec le token reçu       |
 
-### 🎫 Files d'attente & Tickets
-| Méthode | Route                               | Description                |
-|---------|-------------------------------------|----------------------------|
-| POST    | /api/queues/:serviceId/take-ticket  | Prendre un ticket          |
-| GET     | /api/queues/:serviceId              | État de la file            |
-| POST    | /api/queues/:serviceId/call-next    | Appeler le prochain (agent)|
-| POST    | /api/queues/:serviceId/serve/:id   | Marquer comme servi        |
-| DELETE  | /api/queues/:serviceId/cancel/:id  | Annuler un ticket          |
-| GET     | /api/my-tickets                    | Historique utilisateur     |
+Les liens des emails ouvrent l'application web (`/?verify_email=…`, `/?reset_password=…`) qui appelle
+ensuite l'API en POST : un simple aperçu du lien par un client mail ne consomme donc pas le token.
 
-### 🔔 Notifications
-| Méthode | Route                         | Description              |
-|---------|-------------------------------|--------------------------|
-| GET     | /api/notifications            | Lister les notifications |
-| PUT     | /api/notifications/read-all   | Tout marquer comme lu    |
-
-### 📊 Statistiques (Admin)
-| Méthode | Route      | Description              |
-|---------|------------|--------------------------|
-| GET     | /api/stats | Statistiques globales    |
-
-### 🤖 Chatbot (Rasa simulé)
-| Méthode | Route         | Description         |
-|---------|---------------|---------------------|
-| POST    | /api/chatbot  | Envoyer un message  |
+Autres modules : `services/`, `queues/`, `tickets/`, `notifications/`, `chatbot/`, `stats/` (voir Swagger).
 
 ---
 
@@ -166,10 +142,12 @@ Intentions reconnues : bonjour, ticket, attente, annuler,
 
 ## 🧪 Comptes de Démonstration
 
-Utilisez les boutons "Accès Démo Rapide" sur la page de connexion :
-- **👤 Usager** : `moussa@demo.bj` / demo
-- **🏥 Agent** : `agent@demo.bj` / demo  
-- **⚙️ Admin** : `admin@demo.bj` / demo
+Créés par `python seed.py` (**développement uniquement** — ne jamais l'exécuter en production, les mots de passe sont publics) :
+- **⚙️ Admin** : `admin@montour.bj` / `admin1234`
+- **🏥 Agent** : `agent@montour.bj` / `agent1234`
+- **👤 Usager** : `oroukarga@gmail.com` / `user1234`
+
+Tout autre compte créé via l'inscription doit confirmer son email avant de pouvoir se connecter.
 
 ---
 

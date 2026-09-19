@@ -4,6 +4,8 @@
 # =============================================================
 
 import uuid
+import secrets
+from datetime import timedelta
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from django.db import models
 from django.utils import timezone
@@ -26,6 +28,8 @@ class UserManager(BaseUserManager):
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
         extra_fields.setdefault('role', User.ROLE_ADMIN)
+        # Créé en ligne de commande par un opérateur : pas de confirmation par email
+        extra_fields.setdefault('email_verified', True)
         return self.create_user(email, password, **extra_fields)
 
 
@@ -67,10 +71,17 @@ class User(AbstractBaseUser, PermissionsMixin):
     avatar     = models.ImageField(upload_to='avatars/', null=True, blank=True)
 
     # Champs de contrôle Django
-    is_active  = models.BooleanField(default=True)
-    is_staff   = models.BooleanField(default=False)
-    date_joined = models.DateTimeField(default=timezone.now)
-    last_login  = models.DateTimeField(null=True, blank=True)
+    is_active     = models.BooleanField(default=True)
+    is_staff      = models.BooleanField(default=False)
+    date_joined   = models.DateTimeField(default=timezone.now)
+    last_login    = models.DateTimeField(null=True, blank=True)
+
+    # Vérification email
+    email_verified = models.BooleanField(
+        default=False,
+        verbose_name='Email vérifié',
+        help_text='L\'utilisateur a confirmé son adresse email.',
+    )
 
     # Lien Firebase (pour l'auth Google OAuth)
     firebase_uid = models.CharField(max_length=128, blank=True, null=True, unique=True)
@@ -145,6 +156,35 @@ class PasswordResetToken(models.Model):
 
     class Meta:
         db_table = 'mt_password_reset_tokens'
+
+    def is_valid(self):
+        return not self.used and timezone.now() < self.expires_at
+
+
+class EmailVerificationToken(models.Model):
+    """Token de vérification d'adresse email."""
+    id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user       = models.ForeignKey(
+        'User', on_delete=models.CASCADE, related_name='email_verification_tokens'
+    )
+    token      = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField()
+    used       = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'mt_email_verification_tokens'
+        verbose_name = 'Token de vérification email'
+        verbose_name_plural = 'Tokens de vérification email'
+
+    @classmethod
+    def create_for_user(cls, user):
+        """Génère et sauvegarde un nouveau token pour l'utilisateur."""
+        # Invalider les anciens tokens non utilisés
+        cls.objects.filter(user=user, used=False).update(used=True)
+        token_str = secrets.token_urlsafe(32)
+        expires = timezone.now() + timedelta(hours=24)
+        return cls.objects.create(user=user, token=token_str, expires_at=expires)
 
     def is_valid(self):
         return not self.used and timezone.now() < self.expires_at

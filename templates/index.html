@@ -219,21 +219,131 @@
     const { useState, useEffect, useRef, useCallback } = React;
 
     // ============================================================
-    // DATABASE LOCAL & ENPOINTS REST (FALLBACK HYBRIDE)
+    // STOCKAGE LOCAL — tickets, files et notifications (pas encore migrés vers l'API).
+    // Les comptes utilisateurs, eux, sont gérés côté serveur (voir client API ci-dessous).
     // ============================================================
     const localDB = {
-      users: JSON.parse(localStorage.getItem("mt_users") || "[]"),
       tickets: JSON.parse(localStorage.getItem("mt_tickets") || "[]"),
       queues: JSON.parse(localStorage.getItem("mt_queues") || "{}"),
       notifications: JSON.parse(localStorage.getItem("mt_notifs") || "{}"),
     };
 
     const saveDB = () => {
-      localStorage.setItem("mt_users", JSON.stringify(localDB.users));
       localStorage.setItem("mt_tickets", JSON.stringify(localDB.tickets));
       localStorage.setItem("mt_queues", JSON.stringify(localDB.queues));
       localStorage.setItem("mt_notifs", JSON.stringify(localDB.notifications));
     };
+
+    // Ancienne « base » d'utilisateurs locale (mots de passe en clair) : supprimée.
+    try { localStorage.removeItem("mt_users"); } catch (e) { /* stockage indisponible */ }
+
+    // ============================================================
+    // CLIENT API — authentification réelle (JWT) auprès du backend Django
+    // ============================================================
+    const API_BASE = "/api/v1";
+    const SESSION_KEY = "mt_session";
+
+    const Session = {
+      get() { try { return JSON.parse(localStorage.getItem(SESSION_KEY)) || null; } catch (e) { return null; } },
+      set(s) { try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch (e) { /* ignoré */ } },
+      clear() { try { localStorage.removeItem(SESSION_KEY); } catch (e) { /* ignoré */ } },
+    };
+
+    // Rassemble tous les messages d'erreur d'une réponse DRF ({champ: ["msg"], ...})
+    function collectMessages(details) {
+      if (!details) return [];
+      if (typeof details === "string") return [details];
+      if (Array.isArray(details)) return details.flatMap(collectMessages);
+      if (typeof details === "object") return Object.values(details).flatMap(collectMessages);
+      return [];
+    }
+
+    let refreshing = null;
+    function refreshAccessToken() {
+      // Un seul rafraîchissement à la fois (le refresh token est à usage unique : rotation activée)
+      if (!refreshing) {
+        refreshing = (async () => {
+          const s = Session.get();
+          if (!s?.refresh) return false;
+          try {
+            const res = await fetch(`${API_BASE}/auth/token/refresh/`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ refresh: s.refresh }),
+            });
+            if (!res.ok) return false;
+            const json = await res.json();
+            Session.set({ ...s, access: json.access, refresh: json.refresh || s.refresh });
+            return true;
+          } catch (e) { return false; }
+        })().finally(() => { refreshing = null; });
+      }
+      return refreshing;
+    }
+
+    async function apiFetch(path, { method = "GET", body, auth = false } = {}, retried = false) {
+      const headers = { "Content-Type": "application/json" };
+      if (auth) {
+        const s = Session.get();
+        if (s?.access) headers.Authorization = `Bearer ${s.access}`;
+      }
+      let res;
+      try {
+        res = await fetch(API_BASE + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+      } catch (e) {
+        return { ok: false, status: 0, data: null, details: null, message: "Serveur injoignable. Vérifiez votre connexion." };
+      }
+      if (auth && res.status === 401 && !retried && await refreshAccessToken()) {
+        return apiFetch(path, { method, body, auth }, true);
+      }
+      let json = null;
+      try { json = await res.json(); } catch (e) { /* corps non JSON */ }
+      const details = json?.error?.details ?? null;
+      const fromDetails = collectMessages(details).join(" ");
+      const message = res.status === 429
+        ? "Trop de tentatives. Patientez une minute puis réessayez."
+        : (fromDetails || json?.message || json?.error?.message || json?.detail || "Une erreur est survenue.");
+      return { ok: res.ok && json?.success !== false, status: res.status, data: json?.data ?? null, details, message };
+    }
+
+    // Enregistre la session renvoyée par /auth/login/ ou /auth/verify-email/
+    function startSession(data) {
+      Session.set({ access: data.access, refresh: data.refresh, user: data.user });
+      return data.user;
+    }
+
+    // Restaure la session au démarrage. Renvoie l'utilisateur ou null.
+    async function restoreSession() {
+      const s = Session.get();
+      if (!s?.access) return null;
+      const r = await apiFetch("/auth/me/", { auth: true });
+      if (r.ok && r.data?.email_verified) {
+        Session.set({ ...Session.get(), user: r.data });
+        return r.data;
+      }
+      // Hors-ligne : on garde la dernière identité connue plutôt que de déconnecter
+      if (r.status === 0 && s.user?.email_verified) return s.user;
+      Session.clear();
+      return null;
+    }
+
+    async function endSession() {
+      const s = Session.get();
+      Session.clear();
+      if (s?.refresh && s?.access) {
+        // Invalide le refresh token côté serveur (best effort)
+        try {
+          await fetch(`${API_BASE}/auth/logout/`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${s.access}` },
+            body: JSON.stringify({ refresh: s.refresh }),
+          });
+        } catch (e) { /* hors-ligne : la session locale est déjà effacée */ }
+      }
+    }
+
+    const resendVerification = (email) =>
+      apiFetch("/auth/resend-verification/", { method: "POST", body: { email } });
 
     const SERVICES = [
       { id: "svc-1", name: "Centre de Santé de Ségbana 🏥", category: "Santé", description: "Consultations médicales & urgences", icon: "🏥", color: "#ef4444", avgServiceTime: 12, address: "Quartier Administratif, Ségbana" },
@@ -467,33 +577,21 @@
       const [form, setForm] = useState({ email: "", password: "" });
       const [loading, setLoading] = useState(false);
 
-      const handleLogin = () => {
+      const handleLogin = async (e) => {
+        e.preventDefault();
         if (!form.email || !form.password) return showToast("Remplissez tous les champs", "error");
         setLoading(true);
-        setTimeout(() => {
-          const user = localDB.users.find(u => u.email === form.email);
-          if (!user || user.password !== form.password) {
-            showToast("Identifiants incorrects", "error");
-            setLoading(false);
-            return;
-          }
+        const r = await apiFetch("/auth/login/", { method: "POST", body: { email: form.email.trim(), password: form.password } });
+        setLoading(false);
+        if (r.ok) {
           showToast("Bienvenue sur MonTour !", "success");
-          onLogin(user);
-          setLoading(false);
-        }, 500);
-      };
-
-      const demoLogin = (role) => {
-        const demos = {
-          user: { id: "u-1", username: "Ismaïla OROU KARGA", email: "oroukarga@gmail.com", password: "user1234", role: "user", priority: "normal", phone: "+229 96123456" },
-          senior: { id: "u-2", username: "El-Hadj Adamou", email: "senior@montour.bj", password: "senior1234", role: "user", priority: "senior", phone: "+229 97112233" },
-          agent: { id: "u-agent", username: "Agent Guichet Ségbana", email: "agent@montour.bj", password: "agent1234", role: "agent", priority: "normal", phone: "+229 97000002" },
-          admin: { id: "u-admin", username: "Administrateur MonTour", email: "admin@montour.bj", password: "admin1234", role: "admin", priority: "normal", phone: "+229 97000001" },
-        };
-        const u = demos[role];
-        if (!localDB.users.find(x => x.id === u.id)) { localDB.users.push(u); saveDB(); }
-        showToast(`Connecté en tant que ${u.username}`, "success");
-        onLogin(u);
+          return onLogin(startSession(r.data));
+        }
+        // Mot de passe correct mais adresse non confirmée : on propose le renvoi de l'email
+        if (r.status === 403 && r.details?.email_not_verified) {
+          return onNavigate("email-pending", { email: form.email.trim(), fromLogin: true });
+        }
+        showToast(r.message, "error");
       };
 
       return (
@@ -504,27 +602,18 @@
             <p style={{ color: COLORS.textLight, fontSize: 14 }}>Accédez à votre espace MonTour</p>
           </div>
 
-          <div style={S.card}>
+          <form style={S.card} onSubmit={handleLogin}>
             <div style={{ marginBottom: 16 }}>
               <label style={S.label}>Email</label>
-              <input style={S.input} type="email" placeholder="nom@exemple.bj" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} />
+              <input style={S.input} type="email" autoComplete="email" placeholder="nom@exemple.bj" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} />
             </div>
             <div style={{ marginBottom: 20 }}>
               <label style={S.label}>Mot de passe</label>
-              <input style={S.input} type="password" placeholder="••••••••" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} />
+              <input style={S.input} type="password" autoComplete="current-password" placeholder="••••••••" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} />
             </div>
-            <button style={S.btn()} onClick={handleLogin} disabled={loading}>{loading ? "Verification..." : "Se connecter"}</button>
-          </div>
-
-          <div style={S.card}>
-            <p style={{ fontSize: 13, fontWeight: 800, color: COLORS.textLight, marginBottom: 10, textAlign: "center" }}>⚡ COMPTES DÉMO PRÊTS À L'EMPLOI</p>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-              <button style={S.btnOutline(COLORS.primary)} onClick={() => demoLogin("user")}>👤 Usager Normal</button>
-              <button style={S.btnOutline("#f59e0b")} onClick={() => demoLogin("senior")}>👴 Usager Senior</button>
-              <button style={S.btnOutline(COLORS.secondary)} onClick={() => demoLogin("agent")}>👨‍💼 Agent Guichet</button>
-              <button style={S.btnOutline("#8b5cf6")} onClick={() => demoLogin("admin")}>⚙️ Admin Système</button>
-            </div>
-          </div>
+            <button style={S.btn()} type="submit" disabled={loading}>{loading ? "Vérification..." : "Se connecter"}</button>
+            <p style={{ textAlign: "center", color: COLORS.primary, fontSize: 13, fontWeight: 700, marginTop: 14, cursor: "pointer" }} onClick={() => onNavigate("forgot")}>Mot de passe oublié ?</p>
+          </form>
 
           <p style={{ textAlign: "center", color: COLORS.textLight, fontSize: 14, marginTop: 16 }}>
             Pas encore de compte ? <span style={{ color: COLORS.primary, fontWeight: 800, cursor: "pointer" }} onClick={() => onNavigate("register")}>S'inscrire</span>
@@ -534,15 +623,26 @@
     }
 
     // 3. Register Screen
-    function RegisterPage({ onNavigate, onLogin, showToast }) {
-      const [form, setForm] = useState({ username: "", email: "", phone: "", password: "", priority: "normal" });
-      const handleRegister = () => {
+    function RegisterPage({ onNavigate, showToast }) {
+      const [form, setForm] = useState({ username: "", email: "", phone: "", password: "", confirm: "", priority: "normal" });
+      const [loading, setLoading] = useState(false);
+
+      const handleRegister = async (e) => {
+        e.preventDefault();
         if (!form.username || !form.email || !form.password) return showToast("Veuillez remplir les champs obligatoires", "error");
-        const user = { id: `u-${Date.now()}`, username: form.username, email: form.email, phone: form.phone, password: form.password, priority: form.priority, role: "user" };
-        localDB.users.push(user);
-        saveDB();
-        showToast("Compte créé avec succès !", "success");
-        onLogin(user);
+        if (form.password !== form.confirm) return showToast("Les mots de passe ne correspondent pas", "error");
+        setLoading(true);
+        // Toutes les règles (format email, robustesse du mot de passe, unicité…) sont validées par le serveur
+        const r = await apiFetch("/auth/register/", {
+          method: "POST",
+          body: {
+            username: form.username.trim(), email: form.email.trim(), phone: form.phone.trim(),
+            password: form.password, password2: form.confirm, priority: form.priority,
+          },
+        });
+        setLoading(false);
+        if (!r.ok) return showToast(r.message, "error");
+        onNavigate("email-pending", { email: r.data.email, emailSent: r.data.email_sent, fromRegister: true });
       };
 
       return (
@@ -551,10 +651,10 @@
           <h2 style={{ fontSize: 24, fontWeight: 900, margin: 0 }}>Créer un compte</h2>
           <p style={{ color: COLORS.textLight, fontSize: 14, marginBottom: 20 }}>Rejoignez le réseau MonTour à Ségbana</p>
 
-          <div style={S.card}>
-            <div style={{ marginBottom: 14 }}><label style={S.label}>Nom complet *</label><input style={S.input} placeholder="Ismaïla OROU KARGA" value={form.username} onChange={e => setForm({ ...form, username: e.target.value })} /></div>
-            <div style={{ marginBottom: 14 }}><label style={S.label}>Adresse Email *</label><input style={S.input} type="email" placeholder="usager@montour.bj" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} /></div>
-            <div style={{ marginBottom: 14 }}><label style={S.label}>Téléphone</label><input style={S.input} placeholder="+229 96123456" value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} /></div>
+          <form style={S.card} onSubmit={handleRegister}>
+            <div style={{ marginBottom: 14 }}><label style={S.label}>Nom complet *</label><input style={S.input} autoComplete="name" placeholder="Ismaïla OROU KARGA" value={form.username} onChange={e => setForm({ ...form, username: e.target.value })} /></div>
+            <div style={{ marginBottom: 14 }}><label style={S.label}>Adresse Email * <span style={{ fontWeight: 500 }}>(un lien de confirmation vous sera envoyé)</span></label><input style={S.input} type="email" autoComplete="email" placeholder="usager@exemple.bj" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} /></div>
+            <div style={{ marginBottom: 14 }}><label style={S.label}>Téléphone</label><input style={S.input} type="tel" autoComplete="tel" placeholder="+229 96123456" value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} /></div>
             <div style={{ marginBottom: 14 }}>
               <label style={S.label}>Profil & Priorité</label>
               <select style={S.input} value={form.priority} onChange={e => setForm({ ...form, priority: e.target.value })}>
@@ -564,9 +664,210 @@
                 <option value="urgent">🚨 Urgence Médicale</option>
               </select>
             </div>
-            <div style={{ marginBottom: 20 }}><label style={S.label}>Mot de passe *</label><input style={S.input} type="password" placeholder="••••••••" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} /></div>
-            <button style={S.btn()} onClick={handleRegister}>Créer mon compte</button>
+            <div style={{ marginBottom: 14 }}><label style={S.label}>Mot de passe * <span style={{ fontWeight: 500 }}>(8+ car., majuscule, chiffre, spécial)</span></label><input style={S.input} type="password" autoComplete="new-password" placeholder="••••••••" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} /></div>
+            <div style={{ marginBottom: 20 }}><label style={S.label}>Confirmer le mot de passe *</label><input style={S.input} type="password" autoComplete="new-password" placeholder="••••••••" value={form.confirm} onChange={e => setForm({ ...form, confirm: e.target.value })} /></div>
+            <button style={S.btn()} type="submit" disabled={loading}>{loading ? "Création..." : "Créer mon compte"}</button>
+          </form>
+        </div>
+      );
+    }
+
+    // 3b. Écran « Vérifiez votre email » (après inscription ou connexion refusée)
+    function EmailPendingPage({ params, onNavigate, showToast }) {
+      const email = params.email || "";
+      const [loading, setLoading] = useState(false);
+      // Après une inscription, un email vient de partir : on laisse 30 s avant un renvoi
+      const [cooldown, setCooldown] = useState(params.fromRegister && params.emailSent !== false ? 30 : 0);
+
+      useEffect(() => {
+        if (cooldown <= 0) return;
+        const t = setTimeout(() => setCooldown(c => c - 1), 1000);
+        return () => clearTimeout(t);
+      }, [cooldown]);
+
+      const handleResend = async () => {
+        if (loading || cooldown > 0) return;
+        setLoading(true);
+        const r = await resendVerification(email);
+        setLoading(false);
+        showToast(r.ok ? "Nouvel email envoyé. Vérifiez aussi vos spams." : r.message, r.ok ? "success" : "error");
+        if (r.ok || r.status === 429) setCooldown(60);
+      };
+
+      return (
+        <div style={{ padding: 24, paddingTop: 60, minHeight: "100%", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center" }}>
+          <div style={{ width: 96, height: 96, borderRadius: 28, background: "linear-gradient(135deg, #2563eb, #1e3a8a)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 46, marginBottom: 20 }}>📧</div>
+          <h2 style={{ fontSize: 24, fontWeight: 900, margin: "0 0 10px" }}>
+            {params.fromLogin ? "Email non confirmé" : "Vérifiez votre email"}
+          </h2>
+          {params.emailSent === false ? (
+            <p style={{ color: COLORS.danger, fontSize: 14, lineHeight: 1.6, maxWidth: 300 }}>
+              Votre compte est créé mais l'email n'a pas pu être envoyé. Utilisez le bouton ci-dessous pour réessayer.
+            </p>
+          ) : (
+            <p style={{ color: COLORS.textLight, fontSize: 14, lineHeight: 1.6, maxWidth: 300 }}>
+              {params.fromLogin ? "Vous devez confirmer votre adresse avant de vous connecter. Un lien a été envoyé à" : "Un lien de confirmation a été envoyé à"}
+            </p>
+          )}
+          <p style={{ fontWeight: 800, color: COLORS.primary, wordBreak: "break-all", margin: "4px 0 6px" }}>{email}</p>
+          <p style={{ color: COLORS.textLight, fontSize: 13, lineHeight: 1.6, maxWidth: 300, marginBottom: 24 }}>
+            Ouvrez ce lien (valable <strong>24 h</strong>) pour activer votre compte. Pensez à regarder dans vos <strong>spams</strong>.
+          </p>
+          <div style={{ width: "100%", maxWidth: 320, display: "flex", flexDirection: "column", gap: 12 }}>
+            <button style={S.btn()} onClick={handleResend} disabled={loading || cooldown > 0}>
+              {loading ? "Envoi..." : cooldown > 0 ? `Renvoyer dans ${cooldown}s` : "📨 Renvoyer l'email"}
+            </button>
+            <button style={S.btnOutline()} onClick={() => onNavigate("login")}>← Retour à la connexion</button>
           </div>
+        </div>
+      );
+    }
+
+    // 3c. Page ouverte depuis le lien reçu par email : /?verify_email=<token>
+    function VerifyEmailPage({ token, onVerified, onNavigate, showToast }) {
+      const [state, setState] = useState({ status: "loading", message: "" });
+      const [email, setEmail] = useState("");
+      const [sending, setSending] = useState(false);
+      const started = useRef(false);
+
+      useEffect(() => {
+        if (started.current) return; // le token est à usage unique : une seule requête
+        started.current = true;
+        apiFetch("/auth/verify-email/", { method: "POST", body: { token } }).then(r => {
+          if (r.ok) {
+            showToast("Email confirmé, bienvenue sur MonTour !", "success");
+            onVerified(startSession(r.data));
+          } else {
+            setState({ status: "error", message: r.message });
+          }
+        });
+      }, []);
+
+      const handleResend = async (e) => {
+        e.preventDefault();
+        if (!email) return showToast("Saisissez votre adresse email", "error");
+        setSending(true);
+        const r = await resendVerification(email.trim());
+        setSending(false);
+        if (r.ok) onNavigate("email-pending", { email: email.trim(), fromRegister: true });
+        else showToast(r.message, "error");
+      };
+
+      if (state.status === "loading") {
+        return (
+          <div style={{ padding: 24, minHeight: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ width: 44, height: 44, border: `4px solid ${COLORS.border}`, borderTop: `4px solid ${COLORS.primary}`, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+            <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+            <p style={{ marginTop: 16, color: COLORS.textLight, fontWeight: 600 }}>Confirmation de votre email…</p>
+          </div>
+        );
+      }
+
+      return (
+        <div style={{ padding: 24, paddingTop: 60, minHeight: "100%", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center" }}>
+          <div style={{ fontSize: 56, marginBottom: 12 }}>⚠️</div>
+          <h2 style={{ fontSize: 22, fontWeight: 900, margin: "0 0 8px" }}>Lien non valide</h2>
+          <p style={{ color: COLORS.textLight, fontSize: 14, lineHeight: 1.6, maxWidth: 300, marginBottom: 20 }}>{state.message}</p>
+          <form style={{ ...S.card, width: "100%", maxWidth: 320, textAlign: "left" }} onSubmit={handleResend}>
+            <label style={S.label}>Recevoir un nouveau lien</label>
+            <input style={{ ...S.input, marginBottom: 12 }} type="email" autoComplete="email" placeholder="votre@email.bj" value={email} onChange={e => setEmail(e.target.value)} />
+            <button style={S.btn()} type="submit" disabled={sending}>{sending ? "Envoi..." : "📨 Envoyer"}</button>
+          </form>
+          <button style={{ ...S.btnOutline(), maxWidth: 320 }} onClick={() => onNavigate("login")}>← Retour à la connexion</button>
+        </div>
+      );
+    }
+
+    // 3d. Mot de passe oublié : demande du lien de réinitialisation
+    function ForgotPasswordPage({ onNavigate, showToast }) {
+      const [email, setEmail] = useState("");
+      const [loading, setLoading] = useState(false);
+      const [sent, setSent] = useState(false);
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (!email) return showToast("Saisissez votre adresse email", "error");
+        setLoading(true);
+        const r = await apiFetch("/auth/forgot-password/", { method: "POST", body: { email: email.trim() } });
+        setLoading(false);
+        if (r.ok) setSent(true); else showToast(r.message, "error");
+      };
+
+      if (sent) {
+        return (
+          <div style={{ padding: 24, paddingTop: 60, minHeight: "100%", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center" }}>
+            <div style={{ fontSize: 56, marginBottom: 12 }}>📬</div>
+            <h2 style={{ fontSize: 22, fontWeight: 900, margin: "0 0 10px" }}>Consultez votre boîte mail</h2>
+            <p style={{ color: COLORS.textLight, fontSize: 14, lineHeight: 1.6, maxWidth: 300, marginBottom: 24 }}>
+              Si un compte est associé à <strong>{email}</strong>, un lien de réinitialisation (valable 2 h) vient d'être envoyé. Pensez aux spams.
+            </p>
+            <button style={{ ...S.btnOutline(), maxWidth: 320 }} onClick={() => onNavigate("login")}>← Retour à la connexion</button>
+          </div>
+        );
+      }
+
+      return (
+        <div style={{ padding: 24, paddingTop: 40, minHeight: "100%" }}>
+          <button style={{ background: "none", border: "none", fontSize: 24, cursor: "pointer", marginBottom: 12 }} onClick={() => onNavigate("login")}>←</button>
+          <h2 style={{ fontSize: 24, fontWeight: 900, margin: 0 }}>Mot de passe oublié</h2>
+          <p style={{ color: COLORS.textLight, fontSize: 14, marginBottom: 20 }}>Nous vous enverrons un lien pour en choisir un nouveau.</p>
+          <form style={S.card} onSubmit={handleSubmit}>
+            <label style={S.label}>Email</label>
+            <input style={{ ...S.input, marginBottom: 16 }} type="email" autoComplete="email" placeholder="nom@exemple.bj" value={email} onChange={e => setEmail(e.target.value)} />
+            <button style={S.btn()} type="submit" disabled={loading}>{loading ? "Envoi..." : "Envoyer le lien"}</button>
+          </form>
+        </div>
+      );
+    }
+
+    // 3e. Page ouverte depuis le lien reçu par email : /?reset_password=<token>
+    function ResetPasswordPage({ token, onNavigate, showToast }) {
+      const [form, setForm] = useState({ password: "", confirm: "" });
+      const [loading, setLoading] = useState(false);
+      const [expired, setExpired] = useState(false);
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (!form.password) return showToast("Saisissez un nouveau mot de passe", "error");
+        if (form.password !== form.confirm) return showToast("Les mots de passe ne correspondent pas", "error");
+        setLoading(true);
+        const r = await apiFetch("/auth/reset-password/", {
+          method: "POST",
+          body: { token, password: form.password, password2: form.confirm },
+        });
+        setLoading(false);
+        if (r.ok) {
+          showToast("Mot de passe modifié. Connectez-vous.", "success");
+          return onNavigate("login");
+        }
+        // Lien périmé / déjà utilisé : inutile de réessayer, il faut une nouvelle demande
+        if (r.status === 400 && /lien/i.test(r.message)) setExpired(true);
+        showToast(r.message, "error");
+      };
+
+      if (expired) {
+        return (
+          <div style={{ padding: 24, paddingTop: 60, minHeight: "100%", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center" }}>
+            <div style={{ fontSize: 56, marginBottom: 12 }}>⚠️</div>
+            <h2 style={{ fontSize: 22, fontWeight: 900, margin: "0 0 8px" }}>Lien non valide</h2>
+            <p style={{ color: COLORS.textLight, fontSize: 14, lineHeight: 1.6, maxWidth: 300, marginBottom: 20 }}>Ce lien a expiré ou a déjà été utilisé.</p>
+            <button style={{ ...S.btn(), maxWidth: 320, marginBottom: 12 }} onClick={() => onNavigate("forgot")}>Demander un nouveau lien</button>
+            <button style={{ ...S.btnOutline(), maxWidth: 320 }} onClick={() => onNavigate("login")}>← Retour à la connexion</button>
+          </div>
+        );
+      }
+
+      return (
+        <div style={{ padding: 24, paddingTop: 40, minHeight: "100%" }}>
+          <h2 style={{ fontSize: 24, fontWeight: 900, margin: 0 }}>Nouveau mot de passe</h2>
+          <p style={{ color: COLORS.textLight, fontSize: 14, marginBottom: 20 }}>8 caractères minimum, avec majuscule, chiffre et caractère spécial.</p>
+          <form style={S.card} onSubmit={handleSubmit}>
+            <label style={S.label}>Nouveau mot de passe</label>
+            <input style={{ ...S.input, marginBottom: 14 }} type="password" autoComplete="new-password" placeholder="••••••••" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} />
+            <label style={S.label}>Confirmer</label>
+            <input style={{ ...S.input, marginBottom: 20 }} type="password" autoComplete="new-password" placeholder="••••••••" value={form.confirm} onChange={e => setForm({ ...form, confirm: e.target.value })} />
+            <button style={S.btn()} type="submit" disabled={loading}>{loading ? "Enregistrement..." : "Enregistrer"}</button>
+          </form>
         </div>
       );
     }
@@ -926,10 +1227,11 @@
     function ProfilePage({ user, onUpdate, onLogout, showToast }) {
       const [prio, setPrio] = useState(user.priority || "normal");
 
-      const savePrio = () => {
-        user.priority = prio;
-        saveDB();
-        onUpdate({ ...user, priority: prio });
+      const savePrio = async () => {
+        const r = await apiFetch("/auth/me/", { method: "PUT", auth: true, body: { priority: prio } });
+        if (!r.ok) return showToast(r.message, "error");
+        Session.set({ ...Session.get(), user: r.data });
+        onUpdate(r.data);
         showToast("Profil et priorité mis à jour !", "success");
       };
 
@@ -1085,21 +1387,46 @@
 
     // Root Component
     function App() {
-      const [page, setPage] = useState("splash");
+      // Lien reçu par email (/?verify_email=<token> ou /?reset_password=<token>) :
+      // on retire aussitôt le token de l'URL (historique, en-tête Referer)
+      const [emailLink] = useState(() => {
+        const q = new URLSearchParams(window.location.search);
+        const verify = q.get("verify_email"), reset = q.get("reset_password");
+        if (verify || reset) window.history.replaceState(null, "", window.location.pathname);
+        if (verify) return { page: "verify-email", token: verify };
+        if (reset) return { page: "reset-password", token: reset };
+        return null;
+      });
+      const [page, setPage] = useState(emailLink ? emailLink.page : "splash");
       const [user, setUser] = useState(null);
+      const [booting, setBooting] = useState(!emailLink);
       const [params, setParams] = useState({});
       const [toast, setToast] = useState({ msg: "", type: "info" });
 
       const showToast = useCallback((msg, type = "info") => setToast({ msg, type }), []);
       const navigate = useCallback((to, p = {}) => { setPage(to); setParams(p); }, []);
 
+      // Reprise de session au démarrage (JWT stocké + vérification auprès du serveur)
+      useEffect(() => {
+        if (emailLink) return;
+        restoreSession().then(u => {
+          if (u) { setUser(u); setPage("home"); }
+          setBooting(false);
+        });
+      }, []);
+
       const handleLogin = (u) => { setUser(u); navigate("home"); };
-      const handleLogout = () => { setUser(null); navigate("splash"); };
+      const handleLogout = () => { endSession(); setUser(null); navigate("splash"); };
 
       const renderPage = () => {
+        if (booting) return null;
         if (page === "splash") return <SplashScreen onNavigate={navigate} />;
         if (page === "login") return <LoginPage onNavigate={navigate} onLogin={handleLogin} showToast={showToast} />;
-        if (page === "register") return <RegisterPage onNavigate={navigate} onLogin={handleLogin} showToast={showToast} />;
+        if (page === "register") return <RegisterPage onNavigate={navigate} showToast={showToast} />;
+        if (page === "email-pending") return <EmailPendingPage params={params} onNavigate={navigate} showToast={showToast} />;
+        if (page === "verify-email") return <VerifyEmailPage token={emailLink?.token} onVerified={handleLogin} onNavigate={navigate} showToast={showToast} />;
+        if (page === "forgot") return <ForgotPasswordPage onNavigate={navigate} showToast={showToast} />;
+        if (page === "reset-password") return <ResetPasswordPage token={emailLink?.token} onNavigate={navigate} showToast={showToast} />;
         if (!user) return <LoginPage onNavigate={navigate} onLogin={handleLogin} showToast={showToast} />;
 
         switch (page) {
@@ -1114,7 +1441,7 @@
         }
       };
 
-      const showNav = user && !["splash", "login", "register"].includes(page);
+      const showNav = user && !["splash", "login", "register", "email-pending", "verify-email", "forgot", "reset-password"].includes(page);
 
       return (
         <div style={S.app}>

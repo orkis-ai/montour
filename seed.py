@@ -4,7 +4,6 @@
 # =============================================================
 
 import os
-import sys
 import django
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'montour.settings')
@@ -27,6 +26,7 @@ def seed():
     admin_user, created = User.objects.get_or_create(
         email='admin@montour.bj',
         defaults={
+            'email_verified': True,
             'username': 'Admin Ségbana',
             'phone': '+229 97000001',
             'role': User.ROLE_ADMIN,
@@ -41,6 +41,7 @@ def seed():
     agent_user, created = User.objects.get_or_create(
         email='agent@montour.bj',
         defaults={
+            'email_verified': True,
             'username': 'Agent Guichet Ségbana',
             'phone': '+229 97000002',
             'role': User.ROLE_AGENT,
@@ -54,6 +55,7 @@ def seed():
     normal_user, created = User.objects.get_or_create(
         email='oroukarga@gmail.com',
         defaults={
+            'email_verified': True,
             'username': 'Ismaïla OROU KARGA',
             'phone': '+229 96123456',
             'role': User.ROLE_USER,
@@ -67,6 +69,7 @@ def seed():
     senior_user, created = User.objects.get_or_create(
         email='senior@montour.bj',
         defaults={
+            'email_verified': True,
             'username': 'El-Hadj Adamou (Senior)',
             'phone': '+229 97112233',
             'role': User.ROLE_USER,
@@ -80,6 +83,7 @@ def seed():
     handicap_user, created = User.objects.get_or_create(
         email='handicap@montour.bj',
         defaults={
+            'email_verified': True,
             'username': 'Bio Bio Mariam (PMR)',
             'phone': '+229 97445566',
             'role': User.ROLE_USER,
@@ -93,6 +97,7 @@ def seed():
     urgent_user, created = User.objects.get_or_create(
         email='urgent@montour.bj',
         defaults={
+            'email_verified': True,
             'username': 'Salifou Kandi (Urgence)',
             'phone': '+229 97778899',
             'role': User.ROLE_USER,

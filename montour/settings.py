@@ -4,6 +4,7 @@
 # =============================================================
 
 import os
+import warnings
 from pathlib import Path
 from datetime import timedelta
 from dotenv import load_dotenv
@@ -13,16 +14,38 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ─── Sécurité ────────────────────────────────────────────────
-SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-montour-change-in-prod-2025')
-DEBUG = os.getenv('DEBUG', 'True') == 'True'
+_DEFAULT_SECRET_KEY = 'django-insecure-montour-change-in-prod-2025'
+SECRET_KEY = os.getenv('SECRET_KEY', _DEFAULT_SECRET_KEY)
 
 # Vercel : système de fichiers du projet en lecture seule, seul /tmp est
 # inscriptible (voir la config des fichiers statiques/media/DB plus bas).
 IS_VERCEL = bool(os.getenv('VERCEL'))
 
-# Autoriser localhost, IPs locales et domaines Vercel
-raw_hosts = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,.vercel.app,*')
+# DEBUG actif par défaut en local uniquement : sur Vercel, un oubli de la variable
+# d'environnement ne doit pas exposer les pages d'erreur détaillées.
+DEBUG = os.getenv('DEBUG', 'False' if IS_VERCEL else 'True') == 'True'
+
+if SECRET_KEY == _DEFAULT_SECRET_KEY and not DEBUG:
+    # Pas d'exception : elle ferait tomber tout le site si la variable manque.
+    # Mais cette clé est publique (dans le dépôt) : n'importe qui pourrait forger des JWT.
+    warnings.warn("SECRET_KEY par défaut utilisée en production : définissez la variable d'environnement SECRET_KEY.")
+
+# URL publique de l'application web. Sert aux liens des emails (vérification, mot de passe
+# oublié), à ALLOWED_HOSTS et à CORS : elle ne doit JAMAIS venir de l'en-tête Host de la
+# requête (un attaquant pourrait faire envoyer à une victime un lien vers son propre domaine).
+# Sur Vercel, le domaine de production est fourni automatiquement.
+_vercel_host = os.getenv('VERCEL_PROJECT_PRODUCTION_URL') or os.getenv('VERCEL_URL')
+FRONTEND_URL = os.getenv('FRONTEND_URL') or (f'https://{_vercel_host}' if _vercel_host else '')
+
+# Hôtes autorisés : localhost, domaines Vercel et domaine public de l'app. Plus de '*' :
+# un domaine personnalisé doit être déclaré via FRONTEND_URL ou ALLOWED_HOSTS.
+raw_hosts = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,.vercel.app')
 ALLOWED_HOSTS = [h.strip() for h in raw_hosts.split(',') if h.strip()]
+if FRONTEND_URL:
+    from urllib.parse import urlparse
+    _front_host = urlparse(FRONTEND_URL).hostname
+    if _front_host and _front_host not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(_front_host)
 
 # ─── Applications installées ─────────────────────────────────
 DJANGO_APPS = [
@@ -127,6 +150,8 @@ elif os.getenv('USE_SQLITE', 'True').lower() in ('true', '1', 'yes') and not os.
     # entre invocations, mais l'app reste fonctionnelle en attendant qu'un
     # vrai Postgres soit branché).
     sqlite_db = Path('/tmp/db.sqlite3') if IS_VERCEL else BASE_DIR / 'db.sqlite3'
+    if IS_VERCEL:
+        warnings.warn("Aucune DATABASE_URL/POSTGRES_URL : SQLite dans /tmp, les comptes et tickets seront PERDUS à chaque redémarrage de la fonction.")
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
@@ -213,6 +238,9 @@ REST_FRAMEWORK = {
         'anon': '30/min',
         'user': '120/min',
         'auth': '5/min',
+        'register': '5/min',
+        'resend': '5/min',
+        'recovery': '5/min',
     },
 }
 
@@ -232,7 +260,13 @@ SIMPLE_JWT = {
 }
 
 # ─── CORS (Cross-Origin Resource Sharing) ────────────────────
-CORS_ALLOW_ALL_ORIGINS = True
+# L'app web est servie par Django (même origine) : CORS ne concerne que d'autres origines.
+# Ouvert à tous en local uniquement ; en production, liste explicite (CORS_ALLOWED_ORIGINS,
+# séparées par des virgules) — par défaut seulement le domaine public de l'app.
+CORS_ALLOW_ALL_ORIGINS = DEBUG
+CORS_ALLOWED_ORIGINS = [
+    o.strip() for o in os.getenv('CORS_ALLOWED_ORIGINS', FRONTEND_URL).split(',') if o.strip()
+]
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = [
     'accept', 'accept-encoding', 'authorization',
@@ -254,13 +288,24 @@ FIREBASE_SENDER_ID = os.getenv('FIREBASE_SENDER_ID', '')
 FIREBASE_PROJECT_ID = os.getenv('FIREBASE_PROJECT_ID', 'montour-benin')
 
 # ─── Email ────────────────────────────────────────────────────
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
 EMAIL_PORT = int(os.getenv('EMAIL_PORT', 587))
 EMAIL_USE_TLS = True
 EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
-DEFAULT_FROM_EMAIL = 'MonTour <noreply@montour.bj>'
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'MonTour <noreply@montour.bj>')
+# Sans identifiants SMTP (dev local), les emails sont affichés dans la console
+# au lieu d'échouer silencieusement : le lien de vérification y est copiable.
+EMAIL_BACKEND = (
+    'django.core.mail.backends.smtp.EmailBackend'
+    if EMAIL_HOST_USER and EMAIL_HOST_PASSWORD
+    else 'django.core.mail.backends.console.EmailBackend'
+)
+
+# Derrière le proxy Vercel, le schéma réel (https) arrive par X-Forwarded-Proto :
+# sans cela, les liens générés par build_absolute_uri seraient en http://.
+if IS_VERCEL:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 # ─── Logging (compatible environnements serverless read-only) ──
 LOGS_DIR = BASE_DIR / 'logs'
@@ -281,7 +326,7 @@ LOGGING = {
         'simple': {'format': '{levelname}: {message}', 'style': '{'},
     },
     'handlers': {
-        'console': {'class': 'logging.StreamHandler', 'formatter': 'verbose'},
+        'console': {'class': 'montour.log_handlers.SafeStreamHandler', 'formatter': 'verbose'},
     },
     'root': {'handlers': ['console'], 'level': 'INFO'},
     'loggers': {
@@ -294,6 +339,7 @@ if has_file_logging:
     LOGGING['handlers']['file'] = {
         'class': 'logging.FileHandler',
         'filename': LOGS_DIR / 'montour.log',
+        'encoding': 'utf-8',
         'formatter': 'verbose',
     }
     LOGGING['loggers']['apps']['handlers'].append('file')

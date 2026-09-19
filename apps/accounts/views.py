@@ -9,18 +9,17 @@ import logging
 from datetime import timedelta
 from django.utils import timezone
 from rest_framework import status, generics
-from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.throttling import AnonRateThrottle, ScopedRateThrottle
+from rest_framework.throttling import AnonRateThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import User, FCMToken, PasswordResetToken
+from .models import User, FCMToken, PasswordResetToken, EmailVerificationToken
+from .emails import send_verification_email, send_password_reset_email
 from .serializers import (
     RegisterSerializer, LoginSerializer, UserSerializer,
     UpdateProfileSerializer, ChangePasswordSerializer,
-    TokenSerializer, FCMTokenSerializer, ForgotPasswordSerializer,
+    TokenSerializer, FCMTokenSerializer, ForgotPasswordSerializer, ResetPasswordSerializer,
 )
 from montour.utils import api_response, api_error
 from montour.permissions import IsAdminUser
@@ -28,21 +27,38 @@ from montour.permissions import IsAdminUser
 logger = logging.getLogger('apps')
 
 
-# ─── Throttle personnalisé pour l'authentification ────────────
+# ─── Throttles d'authentification ────────────────────────────
+# Chaque `scope` a son propre compteur (par IP) : sans cela, ils partageraient
+# celui du throttle anonyme global et une inscription + une connexion + un
+# renvoi d'email épuiseraient ensemble la limite de 5/minute.
 class AuthRateThrottle(AnonRateThrottle):
-    """Limite les tentatives d'authentification : 5/minute."""
-    rate = '5/min'
+    """Connexion : 5/minute."""
+    scope = 'auth'
+
+
+class RegisterRateThrottle(AnonRateThrottle):
+    scope = 'register'
+
+
+class ResendRateThrottle(AnonRateThrottle):
+    scope = 'resend'
+
+
+class RecoveryRateThrottle(AnonRateThrottle):
+    """Mot de passe oublié + réinitialisation."""
+    scope = 'recovery'
 
 
 # ─── POST /api/v1/auth/register/ ─────────────────────────────
 class RegisterView(APIView):
     """
     Inscription d'un nouvel utilisateur.
-    Crée le compte et retourne les tokens JWT.
+    Crée le compte (inactif tant que l'email n'est pas confirmé) et envoie
+    le lien de vérification : aucun token JWT n'est renvoyé ici.
     Validations : email strict, password fort, username, phone.
     """
     permission_classes = [AllowAny]
-    throttle_classes = [AuthRateThrottle]
+    throttle_classes = [RegisterRateThrottle]
 
     def post(self, request):
         serializer = RegisterSerializer(data=request.data)
@@ -51,7 +67,9 @@ class RegisterView(APIView):
             return api_error('Données d\'inscription invalides', details=serializer.errors)
 
         user = serializer.save()
-        tokens = TokenSerializer.get_tokens(user)
+
+        # Le compte reste inutilisable tant que l'email n'est pas confirmé
+        email_sent = send_verification_email(request, user)
 
         # Notification de bienvenue
         from apps.notifications.models import Notification
@@ -60,14 +78,22 @@ class RegisterView(APIView):
             type=Notification.TYPE_INFO,
             title='🎉 Bienvenue sur MonTour !',
             message=f'Bonjour {user.username}, votre compte a été créé avec succès. '
-                    f'Prenez votre premier ticket maintenant !',
+                    f'Vérifiez votre email pour activer votre compte !',
         )
 
         logger.info(f'[REGISTER] Nouveau compte créé : {user.email}')
 
         return api_response(
-            data={**tokens, 'user': UserSerializer(user, context={'request': request}).data},
-            message='Compte créé avec succès.',
+            data={
+                'email': user.email,
+                'email_verified': False,
+                'email_sent': email_sent,
+            },
+            message=(
+                'Compte créé. Un email de vérification a été envoyé.'
+                if email_sent else
+                "Compte créé, mais l'email de vérification n'a pas pu être envoyé. Demandez un renvoi."
+            ),
             status_code=status.HTTP_201_CREATED,
         )
 
@@ -86,6 +112,13 @@ class LoginView(APIView):
         serializer = LoginSerializer(data=request.data, context={'request': request})
         if not serializer.is_valid():
             logger.warning(f'[LOGIN] Tentative de connexion échouée depuis {request.META.get("REMOTE_ADDR")}')
+            # Détecter spécifiquement l'email non vérifié
+            if 'email_not_verified' in serializer.errors:
+                return api_error(
+                    'Email non vérifié. Consultez votre boîte mail ou demandez un renvoi.',
+                    details={'email_not_verified': True, 'email': request.data.get('email', '')},
+                    status_code=403,
+                )
             return api_error('Identifiants invalides', details=serializer.errors, status_code=401)
 
         user = serializer.validated_data['user']
@@ -180,7 +213,7 @@ class ForgotPasswordView(APIView):
     Rate limited pour éviter l'abus.
     """
     permission_classes = [AllowAny]
-    throttle_classes = [AuthRateThrottle]
+    throttle_classes = [RecoveryRateThrottle]
 
     def post(self, request):
         serializer = ForgotPasswordSerializer(data=request.data)
@@ -202,26 +235,55 @@ class ForgotPasswordView(APIView):
             logger.info(f'[FORGOT-PWD] Tentative avec email inexistant : {email}')
             return api_response(message=generic_message)
 
+        # Un seul lien valide à la fois : les demandes précédentes sont invalidées
+        PasswordResetToken.objects.filter(user=user, used=False).update(used=True)
         token_str = secrets.token_urlsafe(32)
         expires = timezone.now() + timedelta(hours=2)
-
         PasswordResetToken.objects.create(user=user, token=token_str, expires_at=expires)
 
-        # Envoi email (configurer EMAIL_* dans settings.py)
-        try:
-            from django.core.mail import send_mail
-            reset_url = f"https://montour.bj/reset-password?token={token_str}"
-            send_mail(
-                subject='Réinitialisation de votre mot de passe MonTour',
-                message=f'Cliquez sur le lien pour réinitialiser : {reset_url}\n\nLien valide 2 heures.',
-                from_email='noreply@montour.bj',
-                recipient_list=[email],
-            )
-        except Exception as e:
-            logger.error(f'[FORGOT-PWD] Erreur envoi email : {e}')
+        send_password_reset_email(request, user, token_str)
 
         logger.info(f'[FORGOT-PWD] Token de reset généré pour : {email}')
         return api_response(message=generic_message)
+
+
+# ─── POST /api/v1/auth/reset-password/ ───────────────────────
+class ResetPasswordView(APIView):
+    """
+    Choix d'un nouveau mot de passe avec le token reçu par email.
+    POST /api/v1/auth/reset-password/  { token, password, password2 }
+    Le lien a été reçu dans la boîte mail : cela prouve la possession de
+    l'adresse, qui est donc aussi marquée comme vérifiée.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [RecoveryRateThrottle]
+
+    def post(self, request):
+        serializer = ResetPasswordSerializer(data=request.data)
+        if not serializer.is_valid():
+            return api_error('Données invalides', details=serializer.errors)
+
+        try:
+            token = PasswordResetToken.objects.select_related('user').get(
+                token=serializer.validated_data['token']
+            )
+        except PasswordResetToken.DoesNotExist:
+            return api_error('Lien invalide ou déjà utilisé.', status_code=400)
+
+        if not token.is_valid() or not token.user.is_active:
+            return api_error(
+                'Ce lien a expiré ou a déjà été utilisé. Refaites une demande de réinitialisation.',
+                status_code=400,
+            )
+
+        user = token.user
+        user.set_password(serializer.validated_data['password'])
+        user.email_verified = True
+        user.save(update_fields=['password', 'email_verified'])
+        PasswordResetToken.objects.filter(user=user, used=False).update(used=True)
+
+        logger.info(f'[RESET-PWD] Mot de passe réinitialisé : {user.email}')
+        return api_response(message='Mot de passe modifié. Vous pouvez vous connecter.')
 
 
 # ─── GET /api/v1/auth/users/ (Admin seulement) ───────────────
@@ -275,3 +337,81 @@ class FCMTokenView(APIView):
         if deleted:
             return api_response(message='Token FCM désactivé.')
         return api_error('Token FCM introuvable.', status_code=404)
+
+
+# ─── POST /api/v1/auth/verify-email/ ──────────────────────
+class VerifyEmailView(APIView):
+    """
+    Validation du token de vérification email.
+    POST /api/v1/auth/verify-email/  { "token": "<token>" }
+    Si le token est valide, active le compte et retourne les JWT.
+    POST (et non GET) : un lien ouvert par un antivirus ou un aperçu de client
+    mail ne doit pas consommer le token.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        token_str = request.data.get('token', '')
+        if not isinstance(token_str, str) or not token_str.strip():
+            return api_error('Token manquant.', status_code=400)
+        token_str = token_str.strip()
+        if len(token_str) > 128:
+            return api_error('Token invalide.', status_code=400)
+
+        try:
+            token = EmailVerificationToken.objects.select_related('user').get(token=token_str)
+        except EmailVerificationToken.DoesNotExist:
+            return api_error('Lien invalide ou déjà utilisé.', status_code=400)
+
+        if not token.is_valid():
+            return api_error(
+                'Ce lien de vérification a expiré ou a déjà été utilisé. Demandez un nouveau lien.',
+                status_code=400,
+            )
+
+        user = token.user
+        if not user.is_active:
+            return api_error('Ce compte est désactivé.', status_code=403)
+
+        user.email_verified = True
+        user.last_login = timezone.now()
+        user.save(update_fields=['email_verified', 'last_login'])
+
+        token.used = True
+        token.save(update_fields=['used'])
+
+        # Connecter automatiquement l'utilisateur
+        tokens = TokenSerializer.get_tokens(user)
+        logger.info(f'[VERIFY-EMAIL] Email vérifié avec succès : {user.email}')
+
+        return api_response(
+            data={**tokens, 'user': UserSerializer(user, context={'request': request}).data},
+            message='Email vérifié avec succès. Bienvenue sur MonTour !',
+        )
+
+
+# ─── POST /api/v1/auth/resend-verification/ ────────────────
+class ResendVerificationView(APIView):
+    """
+    Renvoie l'email de vérification.
+    POST /api/v1/auth/resend-verification/  { "email": "user@example.com" }
+    Sécurité : réponse identique que le compte existe, soit déjà vérifié ou non
+    (ne révèle pas quelles adresses sont inscrites).
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [ResendRateThrottle]
+
+    def post(self, request):
+        email = request.data.get('email', '')
+        if not isinstance(email, str) or not email.strip():
+            return api_error('Email requis.', status_code=400)
+        email = email.strip().lower()
+
+        user = User.objects.filter(email=email, is_active=True, email_verified=False).first()
+        if user:
+            send_verification_email(request, user, resend=True)
+
+        return api_response(message=(
+            'Si un compte non vérifié est associé à cette adresse, '
+            'un nouvel email de vérification a été envoyé.'
+        ))

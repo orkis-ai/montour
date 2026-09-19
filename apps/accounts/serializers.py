@@ -6,13 +6,12 @@
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password
-from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.tokens import RefreshToken
 from .models import User, FCMToken
 from montour.validators import (
     validate_email_strict, validate_password_strength,
-    validate_username, validate_phone_benin, sanitize_text,
+    validate_username, validate_phone_benin,
 )
 
 
@@ -96,6 +95,11 @@ class LoginSerializer(serializers.Serializer):
             raise serializers.ValidationError('Email ou mot de passe incorrect.')
         if not user.is_active:
             raise serializers.ValidationError('Ce compte est désactivé.')
+        if not user.email_verified:
+            raise serializers.ValidationError(
+                {'email_not_verified': 'Votre adresse email n\'a pas encore été vérifiée. '
+                 'Consultez votre boîte mail ou demandez un renvoi.'}
+            )
         attrs['user'] = user
         return attrs
 
@@ -108,9 +112,9 @@ class UserSerializer(serializers.ModelSerializer):
         model  = User
         fields = [
             'id', 'username', 'email', 'phone', 'role',
-            'priority', 'avatar_url', 'date_joined', 'last_login',
+            'priority', 'avatar_url', 'email_verified', 'date_joined', 'last_login',
         ]
-        read_only_fields = ['id', 'email', 'role', 'date_joined', 'last_login']
+        read_only_fields = ['id', 'email', 'role', 'date_joined', 'last_login', 'email_verified']
 
     def get_avatar_url(self, obj):
         request = self.context.get('request')
@@ -186,6 +190,23 @@ class ChangePasswordSerializer(serializers.Serializer):
                 {'new_password': 'Le nouveau mot de passe doit être différent de l\'ancien.'}
             )
 
+        return attrs
+
+
+# ─── Serializer réinitialisation de mot de passe (lien reçu par email) ───
+class ResetPasswordSerializer(serializers.Serializer):
+    token     = serializers.CharField(max_length=128)
+    password  = serializers.CharField(write_only=True, min_length=8, max_length=128)
+    password2 = serializers.CharField(write_only=True, max_length=128)
+
+    def validate_password(self, value):
+        validate_password_strength(value)
+        validate_password(value)
+        return value
+
+    def validate(self, attrs):
+        if attrs['password'] != attrs.pop('password2'):
+            raise serializers.ValidationError({'password2': 'Les mots de passe ne correspondent pas.'})
         return attrs
 
 
