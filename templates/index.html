@@ -138,7 +138,6 @@
     /* Support des encoches / zones sûres (iPhone notch, barres Android) */
     .mobile-frame {
       padding-top: env(safe-area-inset-top);
-      padding-bottom: env(safe-area-inset-bottom);
     }
 
     /* Scrollbar personnalisée */
@@ -308,15 +307,15 @@
     };
 
     const S = {
-      app: { fontFamily: "'Plus Jakarta Sans', sans-serif", background: COLORS.bg, minHeight: "100%", width: "100%", position: "relative", overflowY: "auto" },
+      app: { fontFamily: "'Plus Jakarta Sans', sans-serif", background: COLORS.bg, height: "100%", width: "100%", position: "relative", display: "flex", flexDirection: "column", overflow: "hidden" },
       card: { background: "#fff", borderRadius: 20, padding: "18px 20px", boxShadow: "0 4px 20px -4px rgba(0,0,0,0.06)", marginBottom: 14, border: `1px solid ${COLORS.border}` },
       btn: (color = COLORS.primary) => ({ background: `linear-gradient(135deg, ${color}, ${color}dd)`, color: "#fff", border: "none", borderRadius: 14, padding: "14px 20px", fontSize: 15, fontWeight: 700, cursor: "pointer", width: "100%", boxShadow: `0 4px 14px ${color}40`, transition: "transform 0.15s, opacity 0.15s", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }),
       btnOutline: (color = COLORS.primary) => ({ background: "transparent", color, border: `2px solid ${color}`, borderRadius: 14, padding: "12px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer", width: "100%", transition: "all 0.15s" }),
       input: { width: "100%", padding: "14px 16px", borderRadius: 14, border: `1.5px solid ${COLORS.border}`, fontSize: 15, outline: "none", boxSizing: "border-box", background: "#f8fafc", color: COLORS.text, fontWeight: 500 },
       label: { fontSize: 13, fontWeight: 700, color: COLORS.textLight, marginBottom: 6, display: "block" },
       badge: (color) => ({ background: color + "18", color, padding: "4px 12px", borderRadius: 30, fontSize: 12, fontWeight: 800 }),
-      navBar: { position: "absolute", bottom: 0, left: 0, right: 0, background: "rgba(255, 255, 255, 0.95)", backdropFilter: "blur(12px)", borderTop: `1px solid ${COLORS.border}`, display: "flex", zIndex: 1000, padding: "6px 0 calc(10px + env(safe-area-inset-bottom))" },
-      navItem: (active) => ({ flex: 1, padding: "8px 2px", display: "flex", flexDirection: "column", alignItems: "center", cursor: "pointer", color: active ? COLORS.primary : COLORS.textLight, background: "none", border: "none", fontWeight: active ? 700 : 500 }),
+      navBar: { flexShrink: 0, position: "relative", background: "rgba(255, 255, 255, 0.95)", backdropFilter: "blur(12px)", borderTop: `1px solid ${COLORS.border}`, display: "flex", zIndex: 1000, padding: "6px 0 calc(10px + env(safe-area-inset-bottom))" },
+      navItem: (active) => ({ flex: 1, minWidth: 0, padding: "8px 2px", display: "flex", flexDirection: "column", alignItems: "center", cursor: "pointer", color: active ? COLORS.primary : COLORS.textLight, background: "none", border: "none", fontWeight: active ? 700 : 500 }),
     };
 
     // Toast Component
@@ -591,7 +590,7 @@
       const unreadCount = (localDB.notifications[user.id] || []).filter(n => !n.read).length;
 
       return (
-        <div style={{ paddingBottom: 80 }}>
+        <div style={{ paddingBottom: 24 }}>
           {/* Header Header */}
           <div style={{ background: "linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%)", padding: "28px 20px 45px", color: "#fff", borderBottomLeftRadius: 28, borderBottomRightRadius: 28 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -742,7 +741,7 @@
         .sort((a, b) => b.priorityScore - a.priorityScore);
 
       return (
-        <div style={{ padding: 20, paddingBottom: 80 }}>
+        <div style={{ padding: 20, paddingBottom: 24 }}>
           <h3 style={{ margin: "0 0 16px", fontSize: 22, fontWeight: 900 }}>File d'attente virtuelle</h3>
 
           {/* Service Selector Tabs */}
@@ -815,7 +814,7 @@
     function MyTicketsPage({ user }) {
       const tickets = (localDB.tickets || []).filter(t => t.userId === user.id).reverse();
       return (
-        <div style={{ padding: 20, paddingBottom: 80 }}>
+        <div style={{ padding: 20, paddingBottom: 24 }}>
           <h3 style={{ margin: "0 0 16px", fontSize: 22, fontWeight: 900 }}>Mes Tickets Virtuels</h3>
           {tickets.length === 0 ? (
             <div style={{ ...S.card, textAlign: "center", padding: 30 }}><span style={{ fontSize: 36 }}>📋</span><p style={{ color: COLORS.textLight, marginTop: 10 }}>Aucun historique de ticket.</p></div>
@@ -862,7 +861,7 @@
       };
 
       return (
-        <div style={{ display: "flex", flexDirection: "column", height: "100%", paddingBottom: 70 }}>
+        <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
           <div style={{ background: "linear-gradient(135deg, #1e3a8a, #2563eb)", padding: 18, color: "#fff", display: "flex", alignItems: "center", gap: 12 }}>
             <span style={{ fontSize: 28 }}>🤖</span>
             <div>
@@ -900,7 +899,7 @@
       };
 
       return (
-        <div style={{ padding: 20, paddingBottom: 80 }}>
+        <div style={{ padding: 20, paddingBottom: 24 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
             <h3 style={{ margin: 0, fontSize: 22, fontWeight: 900 }}>Centre d'alertes</h3>
             {list.length > 0 && <button style={{ background: "none", border: "none", color: COLORS.primary, fontWeight: 700, cursor: "pointer", fontSize: 13 }} onClick={markAllRead}>Tout lire</button>}
@@ -935,7 +934,7 @@
       };
 
       return (
-        <div style={{ padding: 20, paddingBottom: 80 }}>
+        <div style={{ padding: 20, paddingBottom: 24 }}>
           <h3 style={{ margin: "0 0 16px", fontSize: 22, fontWeight: 900 }}>Profil Utilisateur</h3>
           <div style={{ ...S.card, textAlign: "center", padding: 24 }}>
             <div style={{ width: 70, height: 70, borderRadius: "50%", background: COLORS.primary, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 32, fontWeight: 800, margin: "0 auto 12px" }}>{user.username[0]}</div>
@@ -1003,7 +1002,7 @@
       const waiting = q.tickets.filter(t => t.status === "waiting");
 
       return (
-        <div style={{ padding: 20, paddingBottom: 80 }}>
+        <div style={{ padding: 20, paddingBottom: 24 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
             <h3 style={{ margin: 0, fontSize: 22, fontWeight: 900 }}>Espace Guichet / Admin</h3>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1077,7 +1076,7 @@
           {items.map(item => (
             <button key={item.id} style={S.navItem(active === item.id)} onClick={() => onNavigate(item.id)}>
               <span style={{ fontSize: 20 }}>{item.icon}</span>
-              <span style={{ fontSize: 10, marginTop: 2 }}>{item.label}</span>
+              <span style={{ fontSize: 10, marginTop: 2, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.label}</span>
             </button>
           ))}
         </nav>
@@ -1120,7 +1119,7 @@
       return (
         <div style={S.app}>
           <Toast msg={toast.msg} type={toast.type} onClose={() => setToast({ msg: "", type: "info" })} />
-          {renderPage()}
+          <main style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", WebkitOverflowScrolling: "touch" }}>{renderPage()}</main>
           {showNav && <NavBar active={page} onNavigate={navigate} user={user} />}
         </div>
       );
