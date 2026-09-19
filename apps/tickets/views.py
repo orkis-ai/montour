@@ -3,12 +3,12 @@
 # =============================================================
 
 from django.utils import timezone
-from rest_framework import generics, status, permissions
+from rest_framework import generics, permissions
 from rest_framework.views import APIView
 
 from apps.queues.models import Queue
 from montour.utils import api_response, api_error, WaitTimePredictor, PriorityScorer
-from montour.permissions import IsAgentOrAdmin, IsAdminUser
+from montour.permissions import IsAgentOrAdmin
 from apps.notifications.services import NotificationService
 from .models import Ticket
 from .serializers import TicketSerializer, TicketRatingSerializer

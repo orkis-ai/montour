@@ -3,8 +3,6 @@
 # =============================================================
 
 from rest_framework import serializers
-from apps.accounts.serializers import UserSerializer
-from apps.services.serializers import ServiceSerializer
 from .models import Ticket
 from montour.validators import sanitize_text
 

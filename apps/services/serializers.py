@@ -33,21 +33,18 @@ class ServiceSerializer(serializers.ModelSerializer):
         ]
 
     def get_queue_length(self, obj):
-        from apps.queues.models import Queue
         try:
             return obj.queue.tickets.filter(status='waiting').count()
         except Exception:
             return 0
 
     def get_queue_status(self, obj):
-        from apps.queues.models import Queue
         try:
             return obj.queue.status
         except Exception:
             return 'closed'
 
     def get_current_number(self, obj):
-        from apps.queues.models import Queue
         try:
             return obj.queue.called_number
         except Exception:

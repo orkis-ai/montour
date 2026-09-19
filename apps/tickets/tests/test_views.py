@@ -4,7 +4,7 @@
 # =============================================================
 
 from django.test import TestCase
-from rest_framework.test import APITestCase, APIClient
+from rest_framework.test import APITestCase
 from rest_framework import status
 from apps.accounts.models import User
 from apps.services.models import Service
@@ -37,7 +37,7 @@ class TakeTicketTests(APITestCase):
     def test_take_ticket_twice_fails(self):
         self.client.post(f'/api/v1/tickets/take/{self.queue.id}/')
         resp = self.client.post(f'/api/v1/tickets/take/{self.queue.id}/')
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
 
     def test_take_ticket_closed_queue(self):
         self.queue.close()

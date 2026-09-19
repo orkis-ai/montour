@@ -7,7 +7,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 
 from .models import Service
 from .serializers import ServiceSerializer, ServiceCreateUpdateSerializer
-from montour.utils import api_response, api_error
+from montour.utils import api_response
 from montour.permissions import IsAdminUser
 
 
