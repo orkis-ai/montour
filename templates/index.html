@@ -219,23 +219,12 @@
     const { useState, useEffect, useRef, useCallback } = React;
 
     // ============================================================
-    // STOCKAGE LOCAL — tickets, files et notifications (pas encore migrés vers l'API).
-    // Les comptes utilisateurs, eux, sont gérés côté serveur (voir client API ci-dessous).
+    // Les comptes, services, files, tickets et notifications sont gérés côté serveur (API).
+    // Anciennes données locales du navigateur (base simulée, mots de passe en clair) : supprimées.
     // ============================================================
-    const localDB = {
-      tickets: JSON.parse(localStorage.getItem("mt_tickets") || "[]"),
-      queues: JSON.parse(localStorage.getItem("mt_queues") || "{}"),
-      notifications: JSON.parse(localStorage.getItem("mt_notifs") || "{}"),
-    };
-
-    const saveDB = () => {
-      localStorage.setItem("mt_tickets", JSON.stringify(localDB.tickets));
-      localStorage.setItem("mt_queues", JSON.stringify(localDB.queues));
-      localStorage.setItem("mt_notifs", JSON.stringify(localDB.notifications));
-    };
-
-    // Ancienne « base » d'utilisateurs locale (mots de passe en clair) : supprimée.
-    try { localStorage.removeItem("mt_users"); } catch (e) { /* stockage indisponible */ }
+    try {
+      ["mt_users", "mt_tickets", "mt_queues", "mt_notifs"].forEach(k => localStorage.removeItem(k));
+    } catch (e) { /* stockage indisponible */ }
 
     // ============================================================
     // CLIENT API — authentification réelle (JWT) auprès du backend Django
@@ -281,7 +270,7 @@
       return refreshing;
     }
 
-    async function apiFetch(path, { method = "GET", body, auth = false } = {}, retried = false) {
+    async function apiFetch(path, { method = "GET", body, auth = false, quiet = false } = {}, retried = false) {
       const headers = { "Content-Type": "application/json" };
       if (auth) {
         const s = Session.get();
@@ -294,7 +283,12 @@
         return { ok: false, status: 0, data: null, details: null, message: "Serveur injoignable. Vérifiez votre connexion." };
       }
       if (auth && res.status === 401 && !retried && await refreshAccessToken()) {
-        return apiFetch(path, { method, body, auth }, true);
+        return apiFetch(path, { method, body, auth, quiet }, true);
+      }
+      if (auth && res.status === 401 && !quiet) {
+        // Le jeton n'est plus valable et ne peut être renouvelé : retour à la connexion
+        Session.clear();
+        window.dispatchEvent(new Event("mt-session-expired"));
       }
       let json = null;
       try { json = await res.json(); } catch (e) { /* corps non JSON */ }
@@ -303,7 +297,7 @@
       const message = res.status === 429
         ? "Trop de tentatives. Patientez une minute puis réessayez."
         : (fromDetails || json?.message || json?.error?.message || json?.detail || "Une erreur est survenue.");
-      return { ok: res.ok && json?.success !== false, status: res.status, data: json?.data ?? null, details, message };
+      return { ok: res.ok && json?.success !== false, status: res.status, data: json?.data ?? null, raw: json, details, message };
     }
 
     // Enregistre la session renvoyée par /auth/login/ ou /auth/verify-email/
@@ -316,7 +310,7 @@
     async function restoreSession() {
       const s = Session.get();
       if (!s?.access) return null;
-      const r = await apiFetch("/auth/me/", { auth: true });
+      const r = await apiFetch("/auth/me/", { auth: true, quiet: true });
       if (r.ok && r.data?.email_verified) {
         Session.set({ ...Session.get(), user: r.data });
         return r.data;
@@ -345,41 +339,57 @@
     const resendVerification = (email) =>
       apiFetch("/auth/resend-verification/", { method: "POST", body: { email } });
 
-    const SERVICES = [
-      { id: "svc-1", name: "Centre de Santé de Ségbana 🏥", category: "Santé", description: "Consultations médicales & urgences", icon: "🏥", color: "#ef4444", avgServiceTime: 12, address: "Quartier Administratif, Ségbana" },
-      { id: "svc-2", name: "Guichet Administratif (Mairie) 🏛️", category: "Administration", description: "Actes d'état civil & papiers", icon: "🏛️", color: "#3b82f6", avgServiceTime: 8, address: "Mairie de Ségbana" },
-      { id: "svc-3", name: "Agence PEBCO Ségbana 🏦", category: "Microfinance", description: "Épargne, crédits & transferts", icon: "🏦", color: "#10b981", avgServiceTime: 10, address: "Avenue du Marché, Ségbana" },
-      { id: "svc-4", name: "ATDA Pôle 4 Ségbana 🌾", category: "Agriculture", description: "Appui aux producteurs agricoles", icon: "🌾", color: "#f59e0b", avgServiceTime: 15, address: "Zone Agricole ATDA, Ségbana" },
-    ];
+    // ============================================================
+    // Chargement de données depuis l'API, avec rafraîchissement automatique
+    // (la file est partagée entre tous les usagers et les agents : plus de copie locale)
+    // ============================================================
+    // useApi(chemin, { interval }) → { data, loading, error, reload }
+    //   data = contenu de « data » de la réponse, ou la réponse paginée brute { count, results }.
+    //   chemin = null : rien n'est chargé (page en attente d'un identifiant).
+    function useApi(path, { interval = 0 } = {}) {
+      const [state, setState] = useState({ data: null, loading: !!path, error: "" });
+      const alive = useRef(true);
+      const seq = useRef(0);
 
-    SERVICES.forEach(s => {
-      if (!localDB.queues[s.id]) {
-        localDB.queues[s.id] = { tickets: [], status: "open", currentNumber: 0, calledNumber: 0 };
-      }
-    });
+      const load = useCallback(async () => {
+        if (!path) return;
+        const mine = ++seq.current;
+        const r = await apiFetch(path, { auth: true });
+        if (!alive.current || mine !== seq.current) return; // réponse périmée (chemin changé entre-temps)
+        setState(prev => r.ok
+          ? { data: r.data !== null ? r.data : r.raw, loading: false, error: "" }
+          : { data: prev.data, loading: false, error: r.message });
+      }, [path]);
 
-    // Moteur d'estimation IA (TensorFlow Lite simulé)
-    function predictWaitTime(serviceId, positionInQueue, userPriority) {
-      const service = SERVICES.find(s => s.id === serviceId);
-      if (!service) return 0;
-      const base = service.avgServiceTime;
-      const hour = new Date().getHours();
-      let peakFactor = 1.0;
-      if (hour >= 8 && hour <= 10) peakFactor = 1.5;
-      else if (hour >= 11 && hour <= 13) peakFactor = 1.3;
-      else if (hour >= 15 && hour <= 17) peakFactor = 1.4;
-      const pMap = { urgent: 0.3, handicap: 0.5, senior: 0.7, normal: 1.0 };
-      const effectivePos = Math.max(1, positionInQueue * (pMap[userPriority] || 1.0));
-      const estimated = Math.round(effectivePos * base * peakFactor);
-      const noise = 1 + (Math.random() * 0.2 - 0.1);
-      return Math.max(1, Math.round(estimated * noise));
+      useEffect(() => {
+        alive.current = true;
+        setState(prev => ({ data: null, loading: !!path, error: "" }));
+        load();
+        if (!interval || !path) return () => { alive.current = false; };
+        const timer = setInterval(() => { if (document.visibilityState === "visible") load(); }, interval);
+        return () => { alive.current = false; clearInterval(timer); };
+      }, [load, interval]);
+
+      return { ...state, reload: load };
     }
 
-    function computePriorityScore(priority, requestedAt) {
-      const scores = { urgent: 100, handicap: 80, senior: 60, normal: 40 };
-      const base = scores[priority] || 40;
-      const waitedMin = (Date.now() - new Date(requestedAt).getTime()) / 60000;
-      return base + Math.floor(waitedMin);
+    // Affiche « chargement », l'erreur (avec Réessayer) ou l'état vide d'un useApi
+    function ApiState({ api, empty = false, emptyText = "" }) {
+      if (api.loading && !api.data) {
+        return <p style={{ textAlign: "center", color: COLORS.textLight, fontSize: 13, padding: 12 }}>Chargement…</p>;
+      }
+      if (api.error) {
+        return (
+          <div style={{ ...S.card, textAlign: "center" }}>
+            <p style={{ margin: "0 0 10px", color: COLORS.danger, fontSize: 13, fontWeight: 600 }}>{api.error}</p>
+            <button style={{ ...S.btnOutline(), width: "auto", padding: "8px 18px", fontSize: 13 }} onClick={api.reload}>Réessayer</button>
+          </div>
+        );
+      }
+      if (empty && emptyText) {
+        return <p style={{ textAlign: "center", color: COLORS.textLight, fontSize: 13, padding: 12 }}>{emptyText}</p>;
+      }
+      return null;
     }
 
     // Chatbot Rasa KB Fallback
@@ -511,7 +521,7 @@
     }
 
     function StatusBadge({ s }) {
-      const map = { waiting: ["⏳ En attente", "#f59e0b"], called: ["🔔 Appelé au guichet", "#2563eb"], served: ["✅ Servi", "#10b981"], cancelled: ["❌ Annulé", "#ef4444"] };
+      const map = { waiting: ["⏳ En attente", "#f59e0b"], called: ["🔔 Appelé au guichet", "#2563eb"], served: ["✅ Servi", "#10b981"], cancelled: ["❌ Annulé", "#ef4444"], missed: ["🚫 Absent", "#64748b"] };
       const [label, color] = map[s] || ["Inconnu", "#64748b"];
       return <span style={S.badge(color)}>{label}</span>;
     }
@@ -654,7 +664,7 @@
           <form style={S.card} onSubmit={handleRegister}>
             <div style={{ marginBottom: 14 }}><label style={S.label}>Nom complet *</label><input style={S.input} autoComplete="name" placeholder="Ismaïla OROU KARGA" value={form.username} onChange={e => setForm({ ...form, username: e.target.value })} /></div>
             <div style={{ marginBottom: 14 }}><label style={S.label}>Adresse Email * <span style={{ fontWeight: 500 }}>(un lien de confirmation vous sera envoyé)</span></label><input style={S.input} type="email" autoComplete="email" placeholder="usager@exemple.bj" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} /></div>
-            <div style={{ marginBottom: 14 }}><label style={S.label}>Téléphone</label><input style={S.input} type="tel" autoComplete="tel" placeholder="+229 96123456" value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} /></div>
+            <div style={{ marginBottom: 14 }}><label style={S.label}>Téléphone <span style={{ fontWeight: 500 }}>(SMS quand votre tour approche)</span></label><input style={S.input} type="tel" autoComplete="tel" placeholder="+229 01 61 00 00 00" value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} /></div>
             <div style={{ marginBottom: 14 }}>
               <label style={S.label}>Profil & Priorité</label>
               <select style={S.input} value={form.priority} onChange={e => setForm({ ...form, priority: e.target.value })}>
@@ -874,21 +884,13 @@
 
     // 4. Dashboard (Accueil)
     function DashboardPage({ user, onNavigate, showToast, onLogout }) {
-      const [services, setServices] = useState([]);
-      const [myTicket, setMyTicket] = useState(null);
+      const svc = useApi("/services/", { interval: 15000 });
+      const mine = useApi("/tickets/mine/?active=1", { interval: 15000 });
+      const unread = useApi("/notifications/unread-count/", { interval: 15000 });
 
-      useEffect(() => {
-        const list = SERVICES.map(s => {
-          const q = localDB.queues[s.id] || { tickets: [], status: "open" };
-          const waiting = q.tickets.filter(t => t.status === "waiting").length;
-          return { ...s, queueLength: waiting, status: q.status, currentNumber: q.currentNumber, calledNumber: q.calledNumber };
-        });
-        setServices(list);
-        const active = (localDB.tickets || []).find(t => t.userId === user.id && (t.status === "waiting" || t.status === "called"));
-        setMyTicket(active || null);
-      }, [user.id]);
-
-      const unreadCount = (localDB.notifications[user.id] || []).filter(n => !n.read).length;
+      const services = svc.data?.results || [];
+      const myTicket = (mine.data?.results || [])[0] || null;
+      const unreadCount = unread.data?.unread_count || 0;
 
       return (
         <div style={{ paddingBottom: 24 }}>
@@ -922,14 +924,16 @@
                   <div>
                     <span style={{ fontSize: 11, fontWeight: 900, color: "#b45309", letterSpacing: 1 }}>TICKET ACTIF</span>
                     <h2 style={{ fontSize: 32, fontWeight: 900, color: COLORS.text, margin: "2px 0" }}>N° {myTicket.number}</h2>
-                    <p style={{ margin: 0, fontSize: 13, fontWeight: 600, color: COLORS.textLight }}>{SERVICES.find(s => s.id === myTicket.serviceId)?.name}</p>
+                    <p style={{ margin: 0, fontSize: 13, fontWeight: 600, color: COLORS.textLight }}>{myTicket.service_name}</p>
                   </div>
                   <div style={{ textAlign: "right" }}>
                     <StatusBadge s={myTicket.status} />
-                    <p style={{ margin: "8px 0 0", fontSize: 14, color: "#b45309", fontWeight: 800 }}>~{myTicket.estimatedWait} min d'attente</p>
+                    {myTicket.status === "waiting" && (
+                      <p style={{ margin: "8px 0 0", fontSize: 14, color: "#b45309", fontWeight: 800 }}>Rang {myTicket.position} · ~{myTicket.estimated_wait} min</p>
+                    )}
                   </div>
                 </div>
-                <button style={{ ...S.btn("#b45309"), marginTop: 14 }} onClick={() => onNavigate("queue", { serviceId: myTicket.serviceId })}>Suivre mon rang en temps réel →</button>
+                <button style={{ ...S.btn("#b45309"), marginTop: 14 }} onClick={() => onNavigate("queue", { serviceId: myTicket.service_id })}>Suivre mon rang en temps réel →</button>
               </div>
             ) : (
               <div style={{ ...S.card, background: "linear-gradient(135deg, #eff6ff, #dbeafe)", border: "1px solid #bfdbfe", textAlign: "center", padding: 20 }}>
@@ -942,6 +946,7 @@
             {/* Quick Actions */}
             <h4 style={{ fontSize: 16, fontWeight: 800, color: COLORS.text, margin: "20px 0 12px" }}>Services disponibles à Ségbana</h4>
 
+            <ApiState api={svc} empty={services.length === 0} emptyText="Aucun service disponible pour le moment." />
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               {services.map(s => (
                 <div key={s.id} style={{ ...S.card, cursor: "pointer", transition: "transform 0.15s" }} onClick={() => onNavigate("queue", { serviceId: s.id })}>
@@ -951,8 +956,9 @@
                       <h4 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>{s.name}</h4>
                       <p style={{ margin: "2px 0 6px", fontSize: 12, color: COLORS.textLight }}>{s.description}</p>
                       <div style={{ display: "flex", gap: 12, fontSize: 12, fontWeight: 700 }}>
-                        <span style={{ color: s.queueLength > 5 ? COLORS.danger : COLORS.secondary }}>👥 {s.queueLength} en attente</span>
-                        <span style={{ color: COLORS.textLight }}>⏱️ ~{s.avgServiceTime} min/pers</span>
+                        <span style={{ color: s.queue_length > 5 ? COLORS.danger : COLORS.secondary }}>👥 {s.queue_length} en attente</span>
+                        <span style={{ color: COLORS.textLight }}>⏱️ ~{s.avg_service_time} min/pers</span>
+                        {s.queue_status !== "open" && <span style={{ color: COLORS.danger }}>Fermé</span>}
                       </div>
                     </div>
                     <span style={{ fontSize: 20, color: COLORS.textLight }}>→</span>
@@ -967,88 +973,50 @@
 
     // 5. Virtual Queue Screen & Ticket Booking
     function QueuePage({ user, serviceId, showToast }) {
-      const [selectedId, setSelectedId] = useState(serviceId || SERVICES[0].id);
-      const service = SERVICES.find(s => s.id === selectedId) || SERVICES[0];
-      const [queueData, setQueueData] = useState({ tickets: [], status: "open" });
-      const [myTicket, setMyTicket] = useState(null);
+      const svc = useApi("/services/", { interval: 30000 });
+      const services = svc.data?.results || [];
+      const [selectedId, setSelectedId] = useState(serviceId || null);
+      const [busy, setBusy] = useState(false);
+      const service = services.find(s => s.id === selectedId) || services[0];
 
-      const reloadQueue = useCallback(() => {
-        const q = localDB.queues[service.id] || { tickets: [], status: "open", currentNumber: 0, calledNumber: 0 };
-        setQueueData(q);
-        const mine = (localDB.tickets || []).find(t => t.serviceId === service.id && t.userId === user.id && (t.status === "waiting" || t.status === "called"));
-        setMyTicket(mine || null);
-      }, [service.id, user.id]);
+      const queueApi = useApi(service ? `/queues/${service.id}/` : null, { interval: 8000 });
+      const mineApi = useApi("/tickets/mine/?active=1", { interval: 8000 });
+      const queue = queueApi.data || { status: service?.queue_status || "open", called_number: 0, waiting_count: 0, tickets: [] };
+      const myTicket = (mineApi.data?.results || []).find(t => t.service_id === service?.id) || null;
+      const reload = () => { queueApi.reload(); mineApi.reload(); svc.reload(); };
 
-      useEffect(() => { reloadQueue(); }, [reloadQueue]);
-
-      const takeTicket = () => {
-        const q = localDB.queues[service.id];
-        if (q.status !== "open") return showToast("Cette file d'attente est fermée", "error");
-        if (myTicket) return showToast("Vous avez déjà un ticket actif dans ce service", "error");
-
-        const num = q.currentNumber + 1;
-        q.currentNumber = num;
-
-        const waitingCount = q.tickets.filter(t => t.status === "waiting").length + 1;
-        const estimated = predictWaitTime(service.id, waitingCount, user.priority);
-        const score = computePriorityScore(user.priority, new Date().toISOString());
-
-        const ticket = {
-          id: `t-${Date.now()}`,
-          number: num,
-          serviceId: service.id,
-          userId: user.id,
-          userName: user.username,
-          priority: user.priority,
-          priorityScore: score,
-          status: "waiting",
-          estimatedWait: estimated,
-          requestedAt: new Date().toISOString(),
-        };
-
-        q.tickets.push(ticket);
-        localDB.tickets.push(ticket);
-
-        // Notification Push
-        if (!localDB.notifications[user.id]) localDB.notifications[user.id] = [];
-        localDB.notifications[user.id].unshift({
-          id: `n-${Date.now()}`,
-          type: "ticket_taken",
-          title: "🎫 Ticket réservé !",
-          message: `Ticket n°${num} confirmé pour ${service.name}. Temps estimé par l'IA : ~${estimated} min.`,
-          read: false,
-          createdAt: new Date().toISOString(),
-        });
-
-        saveDB();
-        showToast(`Ticket n°${num} obtenu avec succès !`, "success");
-        reloadQueue();
+      const takeTicket = async () => {
+        if (busy || !service) return;
+        setBusy(true);
+        const r = await apiFetch(`/tickets/take/${service.queue_id}/`, { method: "POST", auth: true });
+        setBusy(false);
+        if (!r.ok) return showToast(r.message, "error");
+        showToast(`Ticket n°${r.data.ticket.number} obtenu avec succès !`, "success");
+        reload();
       };
 
-      const cancelTicket = (tId) => {
-        const t = localDB.tickets.find(x => x.id === tId);
-        if (t) t.status = "cancelled";
-        const q = localDB.queues[service.id];
-        if (q) {
-          const qt = q.tickets.find(x => x.id === tId);
-          if (qt) qt.status = "cancelled";
-        }
-        saveDB();
+      const cancelTicket = async (tId) => {
+        if (busy) return;
+        setBusy(true);
+        const r = await apiFetch(`/tickets/${tId}/cancel/`, { method: "DELETE", auth: true });
+        setBusy(false);
+        if (!r.ok) return showToast(r.message, "error");
         showToast("Ticket annulé", "info");
-        reloadQueue();
+        reload();
       };
 
-      const waitingTickets = queueData.tickets.filter(t => t.status === "waiting")
-        .sort((a, b) => b.priorityScore - a.priorityScore);
+      const waitingTickets = queue.tickets || [];
 
       return (
         <div style={{ padding: 20, paddingBottom: 24 }}>
           <h3 style={{ margin: "0 0 16px", fontSize: 22, fontWeight: 900 }}>File d'attente virtuelle</h3>
 
+          <ApiState api={svc} empty={services.length === 0} emptyText="Aucun service disponible pour le moment." />
+          {service && (<>
           {/* Service Selector Tabs */}
           <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 8, marginBottom: 16 }}>
-            {SERVICES.map(s => (
-              <button key={s.id} style={{ ...S.btnOutline(selectedId === s.id ? COLORS.primary : COLORS.textLight), padding: "8px 14px", borderRadius: 20, fontSize: 13, whiteSpace: "nowrap", background: selectedId === s.id ? COLORS.primary + "15" : "transparent" }} onClick={() => setSelectedId(s.id)}>
+            {services.map(s => (
+              <button key={s.id} style={{ ...S.btnOutline(service.id === s.id ? COLORS.primary : COLORS.textLight), padding: "8px 14px", borderRadius: 20, fontSize: 13, whiteSpace: "nowrap", width: "auto", background: service.id === s.id ? COLORS.primary + "15" : "transparent" }} onClick={() => setSelectedId(s.id)}>
                 {s.icon} {s.name.split(" ")[0]}
               </button>
             ))}
@@ -1065,20 +1033,28 @@
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, background: "#f8fafc", padding: 12, borderRadius: 14, textAlign: "center", marginBottom: 16 }}>
-              <div><span style={{ fontSize: 11, color: COLORS.textLight, fontWeight: 700 }}>STATUT</span><p style={{ margin: "2px 0 0", fontSize: 14, fontWeight: 800, color: queueData.status === "open" ? COLORS.secondary : COLORS.danger }}>{queueData.status === "open" ? "OUVERT" : "FERMÉ"}</p></div>
-              <div><span style={{ fontSize: 11, color: COLORS.textLight, fontWeight: 700 }}>EN ATTENTE</span><p style={{ margin: "2px 0 0", fontSize: 14, fontWeight: 800 }}>{waitingTickets.length} usagers</p></div>
-              <div><span style={{ fontSize: 11, color: COLORS.textLight, fontWeight: 700 }}>DERNIER APPEL</span><p style={{ margin: "2px 0 0", fontSize: 14, fontWeight: 800, color: COLORS.primary }}>#{queueData.calledNumber || "-"}</p></div>
+              <div><span style={{ fontSize: 11, color: COLORS.textLight, fontWeight: 700 }}>STATUT</span><p style={{ margin: "2px 0 0", fontSize: 14, fontWeight: 800, color: queue.status === "open" ? COLORS.secondary : COLORS.danger }}>{queue.status === "open" ? "OUVERT" : "FERMÉ"}</p></div>
+              <div><span style={{ fontSize: 11, color: COLORS.textLight, fontWeight: 700 }}>EN ATTENTE</span><p style={{ margin: "2px 0 0", fontSize: 14, fontWeight: 800 }}>{queue.waiting_count} usagers</p></div>
+              <div><span style={{ fontSize: 11, color: COLORS.textLight, fontWeight: 700 }}>DERNIER APPEL</span><p style={{ margin: "2px 0 0", fontSize: 14, fontWeight: 800, color: COLORS.primary }}>#{queue.called_number || "-"}</p></div>
             </div>
 
             {myTicket ? (
-              <div style={{ background: "#eff6ff", border: `1.5px solid ${COLORS.primary}`, padding: 16, borderRadius: 16, textAlign: "center" }}>
-                <p style={{ margin: 0, fontSize: 12, fontWeight: 800, color: COLORS.primary }}>VOTRE TICKET EN COURS</p>
-                <h1 style={{ fontSize: 42, fontWeight: 900, color: COLORS.text, margin: "4px 0" }}>N° {myTicket.number}</h1>
-                <p style={{ margin: 0, fontSize: 13, color: COLORS.textLight }}>Temps estimé par l'IA : <strong style={{ color: COLORS.accent }}>~{myTicket.estimatedWait} min</strong></p>
-                <button style={{ ...S.btnOutline(COLORS.danger), marginTop: 12, padding: "8px 16px", fontSize: 13 }} onClick={() => cancelTicket(myTicket.id)}>Annuler mon ticket</button>
-              </div>
+              myTicket.status === "called" ? (
+                <div style={{ background: "#ecfdf5", border: `1.5px solid ${COLORS.secondary}`, padding: 16, borderRadius: 16, textAlign: "center" }}>
+                  <p style={{ margin: 0, fontSize: 12, fontWeight: 800, color: COLORS.secondary }}>🔔 C'EST VOTRE TOUR !</p>
+                  <h1 style={{ fontSize: 42, fontWeight: 900, color: COLORS.text, margin: "4px 0" }}>N° {myTicket.number}</h1>
+                  <p style={{ margin: 0, fontSize: 13, color: COLORS.textLight }}>Présentez-vous immédiatement au guichet.</p>
+                </div>
+              ) : (
+                <div style={{ background: "#eff6ff", border: `1.5px solid ${COLORS.primary}`, padding: 16, borderRadius: 16, textAlign: "center" }}>
+                  <p style={{ margin: 0, fontSize: 12, fontWeight: 800, color: COLORS.primary }}>VOTRE TICKET EN COURS</p>
+                  <h1 style={{ fontSize: 42, fontWeight: 900, color: COLORS.text, margin: "4px 0" }}>N° {myTicket.number}</h1>
+                  <p style={{ margin: 0, fontSize: 13, color: COLORS.textLight }}>Rang <strong>{myTicket.position}</strong> · temps estimé par l'IA : <strong style={{ color: COLORS.accent }}>~{myTicket.estimated_wait} min</strong></p>
+                  <button style={{ ...S.btnOutline(COLORS.danger), marginTop: 12, padding: "8px 16px", fontSize: 13 }} onClick={() => cancelTicket(myTicket.id)} disabled={busy}>Annuler mon ticket</button>
+                </div>
+              )
             ) : (
-              <button style={S.btn()} onClick={takeTicket} disabled={queueData.status !== "open"}>🎫 Prendre un ticket maintenant</button>
+              <button style={S.btn()} onClick={takeTicket} disabled={queue.status !== "open" || busy}>{busy ? "Réservation..." : "🎫 Prendre un ticket maintenant"}</button>
             )}
           </div>
 
@@ -1090,55 +1066,58 @@
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {waitingTickets.map((t, idx) => (
-                  <div key={t.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", background: t.userId === user.id ? "#eff6ff" : "#f8fafc", borderRadius: 12, border: t.userId === user.id ? `1.5px solid ${COLORS.primary}` : "none" }}>
+                  <div key={t.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", background: t.is_mine ? "#eff6ff" : "#f8fafc", borderRadius: 12, border: t.is_mine ? `1.5px solid ${COLORS.primary}` : "none" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                       <span style={{ width: 26, height: 26, borderRadius: "50%", background: idx === 0 ? COLORS.accent : COLORS.border, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800 }}>{idx + 1}</span>
                       <div>
                         <span style={{ fontWeight: 800, fontSize: 15 }}>Ticket #{t.number}</span>
-                        <p style={{ margin: 0, fontSize: 11, color: COLORS.textLight }}>{t.userName} {t.userId === user.id && "(Vous)"}</p>
+                        <p style={{ margin: 0, fontSize: 11, color: COLORS.textLight }}>{t.user_name} {t.is_mine && "(Vous)"}</p>
                       </div>
                     </div>
                     <div style={{ textAlign: "right" }}>
                       <PriorityBadge p={t.priority} />
-                      <p style={{ margin: "2px 0 0", fontSize: 11, color: COLORS.textLight, fontWeight: 600 }}>Score: {t.priorityScore}</p>
+                      <p style={{ margin: "2px 0 0", fontSize: 11, color: COLORS.textLight, fontWeight: 600 }}>Score: {t.priority_score}</p>
                     </div>
                   </div>
                 ))}
               </div>
             )}
+            {queue.waiting_count > waitingTickets.length && (
+              <p style={{ margin: "10px 0 0", fontSize: 12, color: COLORS.textLight, textAlign: "center" }}>… et {queue.waiting_count - waitingTickets.length} autre(s)</p>
+            )}
           </div>
+          </>)}
         </div>
       );
     }
 
     // 6. User Tickets History Screen
     function MyTicketsPage({ user }) {
-      const tickets = (localDB.tickets || []).filter(t => t.userId === user.id).reverse();
+      const api = useApi("/tickets/mine/", { interval: 15000 });
+      const tickets = api.data?.results || [];
       return (
         <div style={{ padding: 20, paddingBottom: 24 }}>
           <h3 style={{ margin: "0 0 16px", fontSize: 22, fontWeight: 900 }}>Mes Tickets Virtuels</h3>
-          {tickets.length === 0 ? (
+          <ApiState api={api} />
+          {!api.loading && tickets.length === 0 && !api.error ? (
             <div style={{ ...S.card, textAlign: "center", padding: 30 }}><span style={{ fontSize: 36 }}>📋</span><p style={{ color: COLORS.textLight, marginTop: 10 }}>Aucun historique de ticket.</p></div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {tickets.map(t => {
-                const svc = SERVICES.find(s => s.id === t.serviceId);
-                return (
-                  <div key={t.id} style={S.card}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <div>
-                        <span style={{ fontSize: 12, color: COLORS.textLight, fontWeight: 700 }}>{svc?.name || "Service"}</span>
-                        <h3 style={{ margin: "2px 0", fontSize: 24, fontWeight: 900 }}>N° {t.number}</h3>
-                        <p style={{ margin: 0, fontSize: 11, color: COLORS.textLight }}>Réservé le {new Date(t.requestedAt).toLocaleDateString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</p>
-                      </div>
-                      <div style={{ textAlign: "right" }}>
-                        <StatusBadge s={t.status} />
-                        <p style={{ margin: "6px 0 0", fontSize: 12, fontWeight: 700, color: COLORS.primary }}>~{t.estimatedWait} min</p>
-                      </div>
+              {tickets.map(t => (
+                <div key={t.id} style={S.card}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div>
+                      <span style={{ fontSize: 12, color: COLORS.textLight, fontWeight: 700 }}>{t.service_name || "Service"}</span>
+                      <h3 style={{ margin: "2px 0", fontSize: 24, fontWeight: 900 }}>N° {t.number}</h3>
+                      <p style={{ margin: 0, fontSize: 11, color: COLORS.textLight }}>Réservé le {new Date(t.requested_at).toLocaleDateString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</p>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <StatusBadge s={t.status} />
+                      {t.status === "waiting" && <p style={{ margin: "6px 0 0", fontSize: 12, fontWeight: 700, color: COLORS.primary }}>Rang {t.position} · ~{t.estimated_wait} min</p>}
                     </div>
                   </div>
-                );
-              })}
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -1191,30 +1170,33 @@
 
     // 8. Notifications Screen
     function NotificationsPage({ user, showToast }) {
-      const list = localDB.notifications[user.id] || [];
+      const api = useApi("/notifications/", { interval: 15000 });
+      const list = api.data?.results || [];
 
-      const markAllRead = () => {
-        (localDB.notifications[user.id] || []).forEach(n => n.read = true);
-        saveDB();
+      const markAllRead = async () => {
+        const r = await apiFetch("/notifications/read-all/", { method: "PUT", auth: true });
+        if (!r.ok) return showToast(r.message, "error");
         showToast("Toutes les notifications marquées comme lues", "info");
+        api.reload();
       };
 
       return (
         <div style={{ padding: 20, paddingBottom: 24 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
             <h3 style={{ margin: 0, fontSize: 22, fontWeight: 900 }}>Centre d'alertes</h3>
-            {list.length > 0 && <button style={{ background: "none", border: "none", color: COLORS.primary, fontWeight: 700, cursor: "pointer", fontSize: 13 }} onClick={markAllRead}>Tout lire</button>}
+            {list.some(n => !n.is_read) && <button style={{ background: "none", border: "none", color: COLORS.primary, fontWeight: 700, cursor: "pointer", fontSize: 13 }} onClick={markAllRead}>Tout lire</button>}
           </div>
 
-          {list.length === 0 ? (
+          <ApiState api={api} />
+          {!api.loading && list.length === 0 && !api.error ? (
             <div style={{ ...S.card, textAlign: "center", padding: 30 }}><span style={{ fontSize: 36 }}>🔔</span><p style={{ color: COLORS.textLight, marginTop: 10 }}>Aucune notification récente.</p></div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               {list.map(n => (
-                <div key={n.id} style={{ ...S.card, background: n.read ? "#fff" : "#eff6ff", border: n.read ? `1px solid ${COLORS.border}` : `1.5px solid ${COLORS.primary}` }}>
+                <div key={n.id} style={{ ...S.card, background: n.is_read ? "#fff" : "#eff6ff", border: n.is_read ? `1px solid ${COLORS.border}` : `1.5px solid ${COLORS.primary}` }}>
                   <h4 style={{ margin: 0, fontSize: 15, fontWeight: 800 }}>{n.title}</h4>
                   <p style={{ margin: "4px 0 6px", fontSize: 13, color: COLORS.textLight }}>{n.message}</p>
-                  <span style={{ fontSize: 11, color: COLORS.textLight }}>{new Date(n.createdAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
+                  <span style={{ fontSize: 11, color: COLORS.textLight }}>{new Date(n.created_at).toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
                 </div>
               ))}
             </div>
@@ -1226,13 +1208,15 @@
     // 9. Profile Screen
     function ProfilePage({ user, onUpdate, onLogout, showToast }) {
       const [prio, setPrio] = useState(user.priority || "normal");
+      const [phone, setPhone] = useState(user.phone || "");
+      const [sms, setSms] = useState(user.sms_notifications !== false);
 
       const savePrio = async () => {
-        const r = await apiFetch("/auth/me/", { method: "PUT", auth: true, body: { priority: prio } });
+        const r = await apiFetch("/auth/me/", { method: "PUT", auth: true, body: { priority: prio, phone: phone.trim(), sms_notifications: sms } });
         if (!r.ok) return showToast(r.message, "error");
         Session.set({ ...Session.get(), user: r.data });
         onUpdate(r.data);
-        showToast("Profil et priorité mis à jour !", "success");
+        showToast("Profil mis à jour !", "success");
       };
 
       return (
@@ -1253,6 +1237,12 @@
               <option value="handicap">♿ Personne Handicapée (Score base 80)</option>
               <option value="urgent">🚨 Urgence Médicale (Score base 100)</option>
             </select>
+            <label style={S.label}>Téléphone (pour les SMS de rappel)</label>
+            <input style={{ ...S.input, marginBottom: 12 }} type="tel" autoComplete="tel" placeholder="+229 01 61 00 00 00" value={phone} onChange={e => setPhone(e.target.value)} />
+            <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 14, fontWeight: 600, color: COLORS.text, marginBottom: 16, cursor: "pointer" }}>
+              <input type="checkbox" checked={sms} onChange={e => setSms(e.target.checked)} style={{ width: 18, height: 18 }} />
+              Me prévenir par SMS quand mon tour approche
+            </label>
             <button style={S.btn()} onClick={savePrio}>Enregistrer les modifications</button>
           </div>
 
@@ -1265,43 +1255,34 @@
 
     // 10. Agent & Admin Management Dashboard
     function AdminPage({ user, showToast, onLogout }) {
-      const [selectedService, setSelectedService] = useState(SERVICES[0].id);
-      const service = SERVICES.find(s => s.id === selectedService) || SERVICES[0];
-      const q = localDB.queues[service.id] || { tickets: [], status: "open", calledNumber: 0 };
-      const [refresh, setRefresh] = useState(0);
+      const svc = useApi("/services/", { interval: 30000 });
+      const services = svc.data?.results || [];
+      const [selectedService, setSelectedService] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const service = services.find(s => s.id === selectedService) || services[0];
 
-      const callNext = () => {
-        const waiting = q.tickets.filter(t => t.status === "waiting").sort((a, b) => b.priorityScore - a.priorityScore);
-        if (waiting.length === 0) return showToast("Aucun ticket en attente dans cette file", "error");
+      const queueApi = useApi(service ? `/queues/${service.id}/` : null, { interval: 6000 });
+      const waitingApi = useApi(service?.queue_id ? `/tickets/queues/${service.queue_id}/?status=waiting` : null, { interval: 6000 });
+      const calledApi = useApi(service?.queue_id ? `/tickets/queues/${service.queue_id}/?status=called` : null, { interval: 6000 });
+      const queue = queueApi.data || { status: "open", called_number: 0 };
+      const waiting = waitingApi.data?.results || [];
+      const called = calledApi.data?.results || [];
+      const reload = () => { queueApi.reload(); waitingApi.reload(); calledApi.reload(); };
 
-        const next = waiting[0];
-        next.status = "called";
-        q.calledNumber = next.number;
-
-        // Notify User
-        if (!localDB.notifications[next.userId]) localDB.notifications[next.userId] = [];
-        localDB.notifications[next.userId].unshift({
-          id: `n-${Date.now()}`,
-          type: "your_turn",
-          title: "🔔 VOTRE TOUR APPROCHE !",
-          message: `Ticket n°${next.number} — Présentez-vous immédiatement au guichet de ${service.name}.`,
-          read: false,
-          createdAt: new Date().toISOString(),
-        });
-
-        saveDB();
-        showToast(`Ticket n°${next.number} (${next.userName}) appelé au guichet !`, "success");
-        setRefresh(r => r + 1);
+      const act = async (path, okMessage) => {
+        if (busy) return;
+        setBusy(true);
+        const r = await apiFetch(path, { method: "POST", auth: true });
+        setBusy(false);
+        if (!r.ok) return showToast(r.message, "error");
+        showToast(okMessage(r), "success");
+        reload();
       };
 
-      const toggleQueue = () => {
-        q.status = q.status === "open" ? "closed" : "open";
-        saveDB();
-        showToast(`File ${q.status === "open" ? "ouverte" : "fermée"} !`, "info");
-        setRefresh(r => r + 1);
-      };
-
-      const waiting = q.tickets.filter(t => t.status === "waiting");
+      const callNext = () => act(`/tickets/queues/${service.queue_id}/call-next/`, r => `Ticket n°${r.data.number} appelé au guichet !`);
+      const toggleQueue = () => act(`/queues/${service.queue_id}/toggle/`, r => r.message || "File mise à jour");
+      const serve = (t) => act(`/tickets/${t.id}/serve/`, () => `Ticket n°${t.number} servi`);
+      const missed = (t) => act(`/tickets/${t.id}/missed/`, () => `Ticket n°${t.number} marqué absent`);
 
       return (
         <div style={{ padding: 20, paddingBottom: 24 }}>
@@ -1313,11 +1294,13 @@
             </div>
           </div>
 
+          <ApiState api={svc} empty={services.length === 0} emptyText="Aucun service n'est configuré." />
+          {service && (<>
           {/* Select Service */}
           <div style={{ marginBottom: 14 }}>
             <label style={S.label}>Guichet / Service à gérer</label>
-            <select style={S.input} value={selectedService} onChange={e => setSelectedService(e.target.value)}>
-              {SERVICES.map(s => <option key={s.id} value={s.id}>{s.icon} {s.name}</option>)}
+            <select style={S.input} value={service.id} onChange={e => setSelectedService(e.target.value)}>
+              {services.map(s => <option key={s.id} value={s.id}>{s.icon} {s.name}</option>)}
             </select>
           </div>
 
@@ -1326,17 +1309,41 @@
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
               <div>
                 <h4 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>{service.name}</h4>
-                <p style={{ margin: "2px 0 0", fontSize: 12, color: COLORS.textLight }}>Dernier appelé : <strong style={{ color: COLORS.primary }}>#{q.calledNumber || "-"}</strong></p>
+                <p style={{ margin: "2px 0 0", fontSize: 12, color: COLORS.textLight }}>Dernier appelé : <strong style={{ color: COLORS.primary }}>#{queue.called_number || "-"}</strong></p>
               </div>
-              <button style={{ ...S.btnOutline(q.status === "open" ? COLORS.danger : COLORS.secondary), width: "auto", padding: "6px 14px", fontSize: 12 }} onClick={toggleQueue}>
-                {q.status === "open" ? "Fermer la file" : "Ouvrir la file"}
+              <button style={{ ...S.btnOutline(queue.status === "open" ? COLORS.danger : COLORS.secondary), width: "auto", padding: "6px 14px", fontSize: 12 }} onClick={toggleQueue} disabled={busy}>
+                {queue.status === "open" ? "Fermer la file" : "Ouvrir la file"}
               </button>
             </div>
 
-            <button style={{ ...S.btn(COLORS.secondary), padding: "16px", fontSize: 16 }} onClick={callNext} disabled={q.status !== "open" || waiting.length === 0}>
+            <button style={{ ...S.btn(COLORS.secondary), padding: "16px", fontSize: 16 }} onClick={callNext} disabled={busy || waiting.length === 0}>
               📢 APPELER LE PROCHAIN TICKET (IA)
             </button>
           </div>
+
+          {/* Tickets appelés : à clôturer */}
+          {called.length > 0 && (
+            <div style={S.card}>
+              <h4 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 800 }}>Au guichet ({called.length})</h4>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {called.map(t => (
+                  <div key={t.id} style={{ padding: "10px 12px", background: "#ecfdf5", borderRadius: 12 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <div>
+                        <span style={{ fontWeight: 800, fontSize: 15 }}>Ticket #{t.number}</span>
+                        <p style={{ margin: 0, fontSize: 11, color: COLORS.textLight }}>{t.user_name}</p>
+                      </div>
+                      <PriorityBadge p={t.priority} />
+                    </div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button style={{ ...S.btn(COLORS.secondary), padding: "8px 12px", fontSize: 13 }} onClick={() => serve(t)} disabled={busy}>✅ Servi</button>
+                      <button style={{ ...S.btnOutline(COLORS.danger), padding: "8px 12px", fontSize: 13 }} onClick={() => missed(t)} disabled={busy}>🚫 Absent</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Queue List */}
           <div style={S.card}>
@@ -1345,11 +1352,11 @@
               <p style={{ color: COLORS.textLight, fontSize: 13, textAlign: "center" }}>La file est vide.</p>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {waiting.sort((a, b) => b.priorityScore - a.priorityScore).map(t => (
+                {waiting.map(t => (
                   <div key={t.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 12px", background: "#f8fafc", borderRadius: 12 }}>
                     <div>
                       <span style={{ fontWeight: 800, fontSize: 15 }}>Ticket #{t.number}</span>
-                      <p style={{ margin: 0, fontSize: 11, color: COLORS.textLight }}>{t.userName}</p>
+                      <p style={{ margin: 0, fontSize: 11, color: COLORS.textLight }}>{t.user_name}</p>
                     </div>
                     <PriorityBadge p={t.priority} />
                   </div>
@@ -1357,6 +1364,7 @@
               </div>
             )}
           </div>
+          </>)}
         </div>
       );
     }
@@ -1413,6 +1421,13 @@
           if (u) { setUser(u); setPage("home"); }
           setBooting(false);
         });
+      }, []);
+
+      // Jeton expiré/révoqué et non renouvelable (voir apiFetch) : retour à la connexion
+      useEffect(() => {
+        const onExpired = () => { setUser(null); navigate("login"); showToast("Session expirée, reconnectez-vous.", "info"); };
+        window.addEventListener("mt-session-expired", onExpired);
+        return () => window.removeEventListener("mt-session-expired", onExpired);
       }, []);
 
       const handleLogin = (u) => { setUser(u); navigate("home"); };

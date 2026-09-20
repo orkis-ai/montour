@@ -49,3 +49,47 @@ class Notification(models.Model):
         self.is_read = True
         self.read_at = timezone.now()
         self.save(update_fields=['is_read', 'read_at'])
+
+
+class SMSLog(models.Model):
+    """Journal des SMS : suivi des envois, des échecs et du coût."""
+    KIND_APPROACH = 'approach'
+    KIND_CALLED   = 'called'
+    KIND_TEST     = 'test'
+    KIND_CHOICES = [
+        (KIND_APPROACH, 'Tour qui approche'),
+        (KIND_CALLED,   'Tour arrivé'),
+        (KIND_TEST,     'Test'),
+    ]
+    STATUS_SENT    = 'sent'
+    STATUS_FAILED  = 'failed'
+    STATUS_SKIPPED = 'skipped'
+    STATUS_CHOICES = [
+        (STATUS_SENT,    'Envoyé'),
+        (STATUS_FAILED,  'Échec'),
+        (STATUS_SKIPPED, 'Ignoré'),
+    ]
+
+    id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user       = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name='sms_logs')
+    ticket     = models.ForeignKey(
+        'tickets.Ticket', null=True, blank=True, on_delete=models.SET_NULL, related_name='sms_logs'
+    )
+    kind       = models.CharField(max_length=10, choices=KIND_CHOICES)
+    to         = models.CharField(max_length=20, blank=True)
+    text       = models.TextField(blank=True)
+    provider   = models.CharField(max_length=20, blank=True)
+    status     = models.CharField(max_length=10, choices=STATUS_CHOICES)
+    provider_message_id = models.CharField(max_length=100, blank=True)
+    error      = models.TextField(blank=True, help_text="Motif de l'échec ou de l'abandon")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'mt_sms_logs'
+        verbose_name = 'SMS'
+        verbose_name_plural = 'SMS'
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['status', 'created_at'])]
+
+    def __str__(self):
+        return f'[{self.kind}/{self.status}] {self.to}'

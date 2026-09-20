@@ -33,8 +33,8 @@ montour/
 | **IA/ML**        | Algorithme prédictif intégré (simule TFLite)               |
 | **Chatbot**      | NLP basé sur règles (simule Rasa)                          |
 
-> Les tickets, files et notifications de l'interface web sont encore stockés dans le
-> navigateur (`localStorage`) ; seuls les comptes passent par l'API.
+> Comptes, services, files, tickets et notifications passent tous par l'API. L'interface se
+> rafraîchit automatiquement (toutes les 6 à 15 s) car la file est partagée entre usagers et agents.
 
 ---
 
@@ -82,6 +82,24 @@ Les liens des emails ouvrent l'application web (`/?verify_email=…`, `/?reset_p
 ensuite l'API en POST : un simple aperçu du lien par un client mail ne consomme donc pas le token.
 
 Autres modules : `services/`, `queues/`, `tickets/`, `notifications/`, `chatbot/`, `stats/` (voir Swagger).
+
+---
+
+## 📲 SMS de rappel
+
+Quand la file avance (appel du suivant, annulation, service), l'API prévient par **notification dans l'app + SMS** :
+- les usagers dont il ne reste plus que `SMS_APPROACH_THRESHOLD` personnes devant eux (2 par défaut), **une seule fois par ticket** ;
+- l'usager dont le tour est arrivé (SMS « c'est votre tour »).
+
+Chaque usager peut désactiver les SMS ou changer son numéro depuis son profil. Les numéros béninois sont normalisés en `+229 01XXXXXXXX`
+(les anciens numéros à 8 chiffres sont acceptés et convertis). Tous les envois, échecs et abandons sont visibles dans l'admin Django (**SMS**).
+
+Configuration : un fournisseur (Twilio ou Africa's Talking) — voir la section SMS de `.env.example`. Sans fournisseur, aucun SMS n'est
+envoyé ; en développement, `SMS_PROVIDER=console` affiche le SMS dans la console du serveur. Un échec du fournisseur ne bloque jamais l'appel d'un ticket.
+
+> L'interface web utilise l'API pour tout (services, files, tickets, notifications) : ses tickets déclenchent donc ces SMS.
+> Les quatre services de Ségbana et leurs files sont créés automatiquement par la migration `queues.0002` (aucun compte
+> n'est créé) ; on peut en ajouter depuis l'admin Django.
 
 ---
 

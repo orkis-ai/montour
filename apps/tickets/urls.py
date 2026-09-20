@@ -5,7 +5,7 @@
 from django.urls import path
 from .views import (
     TakeTicketView, MyTicketsView, CancelTicketView,
-    CallNextTicketView, ServeTicketView, RateTicketView,
+    CallNextTicketView, ServeTicketView, MissTicketView, RateTicketView,
     QueueTicketsView,
 )
 
@@ -16,6 +16,7 @@ urlpatterns = [
     path('mine/',                                   MyTicketsView.as_view(),      name='mine'),
     path('<uuid:ticket_id>/cancel/',                CancelTicketView.as_view(),   name='cancel'),
     path('<uuid:ticket_id>/serve/',                 ServeTicketView.as_view(),    name='serve'),
+    path('<uuid:ticket_id>/missed/',                MissTicketView.as_view(),     name='missed'),
     path('<uuid:ticket_id>/rate/',                  RateTicketView.as_view(),     name='rate'),
     path('queues/<uuid:queue_id>/call-next/',       CallNextTicketView.as_view(), name='call-next'),
     path('queues/<uuid:queue_id>/',                 QueueTicketsView.as_view(),   name='queue-tickets'),

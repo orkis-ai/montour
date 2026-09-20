@@ -20,6 +20,7 @@ class ServiceHoursSerializer(serializers.ModelSerializer):
 
 class ServiceSerializer(serializers.ModelSerializer):
     hours        = ServiceHoursSerializer(many=True, read_only=True)
+    queue_id     = serializers.SerializerMethodField()
     queue_length = serializers.SerializerMethodField()
     queue_status = serializers.SerializerMethodField()
     current_number = serializers.SerializerMethodField()
@@ -29,8 +30,14 @@ class ServiceSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'description', 'category', 'icon', 'color',
             'avg_service_time', 'address', 'phone', 'is_active',
-            'hours', 'queue_length', 'queue_status', 'current_number',
+            'hours', 'queue_id', 'queue_length', 'queue_status', 'current_number',
         ]
+
+    def get_queue_id(self, obj):
+        try:
+            return str(obj.queue.id)
+        except Exception:
+            return None
 
     def get_queue_length(self, obj):
         try:

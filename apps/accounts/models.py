@@ -83,6 +83,13 @@ class User(AbstractBaseUser, PermissionsMixin):
         help_text='L\'utilisateur a confirmé son adresse email.',
     )
 
+    # Préférence : SMS de rappel quand le tour approche (nécessite un téléphone renseigné)
+    sms_notifications = models.BooleanField(
+        default=True,
+        verbose_name='Recevoir des SMS',
+        help_text="Rappel par SMS quand le tour de l'usager approche ou arrive.",
+    )
+
     # Lien Firebase (pour l'auth Google OAuth)
     firebase_uid = models.CharField(max_length=128, blank=True, null=True, unique=True)
 

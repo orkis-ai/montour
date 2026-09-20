@@ -2,6 +2,7 @@
 # MonTour — apps/tickets/views.py
 # =============================================================
 
+from django.db import transaction
 from django.utils import timezone
 from rest_framework import generics, permissions
 from rest_framework.views import APIView
@@ -19,8 +20,14 @@ class TakeTicketView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, queue_id):
+        # Verrou sur la file : deux usagers qui prennent un ticket en même temps ne
+        # doivent pas recevoir le même numéro.
+        with transaction.atomic():
+            return self._take(request, queue_id)
+
+    def _take(self, request, queue_id):
         try:
-            queue = Queue.objects.select_related('service').get(pk=queue_id)
+            queue = Queue.objects.select_related('service').select_for_update().get(pk=queue_id)
         except Queue.DoesNotExist:
             return api_error('File d\'attente introuvable.', 404)
 
@@ -76,6 +83,8 @@ class MyTicketsView(generics.ListAPIView):
             valid_statuses = [c[0] for c in Ticket.STATUS_CHOICES]
             if s in valid_statuses:
                 qs = qs.filter(status=s)
+        if self.request.query_params.get('active'):  # tickets en attente ou appelés
+            qs = qs.filter(status__in=[Ticket.STATUS_WAITING, Ticket.STATUS_CALLED])
         return qs.order_by('-requested_at')
 
 
@@ -92,6 +101,8 @@ class CancelTicketView(APIView):
         if ticket.status != Ticket.STATUS_WAITING:
             return api_error('Seuls les tickets en attente peuvent être annulés.', 400)
         ticket.cancel()
+        # Les usagers derrière ce ticket avancent d'un rang
+        NotificationService.notify_queue_progress(ticket.queue)
         return api_response(data=TicketSerializer(ticket).data, message='Ticket annulé avec succès.')
 
 
@@ -116,13 +127,17 @@ class CallNextTicketView(APIView):
 
         next_ticket.call()
 
+        service_name = queue.service.name
         NotificationService.send(
             user=next_ticket.user,
             notif_type='your_turn',
-            title='🔔 Votre tour approche !',
+            title="🔔 C'est votre tour !",
             message=(f'Ticket n°{next_ticket.number} — Présentez-vous immédiatement '
-                     f'au guichet de {queue.service.name}.'),
+                     f'au guichet de {service_name}.'),
             ticket=next_ticket,
+            sms_kind='called',
+            sms_text=(f"MonTour : c'est votre tour ! Ticket numero {next_ticket.number}, "
+                      f'presentez-vous au guichet {service_name}.'),
         )
 
         # Recalculer les estimations pour les tickets restants
@@ -131,6 +146,9 @@ class CallNextTicketView(APIView):
         for i, t in enumerate(remaining):
             t.estimated_wait = WaitTimePredictor.predict(queue.service, i + 1, t.priority)
         Ticket.objects.bulk_update(remaining, ['estimated_wait'])
+
+        # Prévenir ceux dont le tour approche (notification + SMS)
+        NotificationService.notify_queue_progress(queue)
 
         return api_response(
             data=TicketSerializer(next_ticket).data,
@@ -149,8 +167,26 @@ class ServeTicketView(APIView):
             return api_error('Ticket introuvable.', 404)
         if ticket.status not in [Ticket.STATUS_CALLED, Ticket.STATUS_WAITING]:
             return api_error(f'Ticket déjà {ticket.status}.', 400)
+        was_waiting = ticket.status == Ticket.STATUS_WAITING
         ticket.serve()
+        if was_waiting:  # servi sans passer par l'appel : la file avance
+            NotificationService.notify_queue_progress(ticket.queue)
         return api_response(data=TicketSerializer(ticket).data, message='Ticket marqué comme servi.')
+
+
+class MissTicketView(APIView):
+    """POST /api/v1/tickets/<ticket_id>/missed/ — Usager appelé mais absent (Agent/Admin)."""
+    permission_classes = [permissions.IsAuthenticated, IsAgentOrAdmin]
+
+    def post(self, request, ticket_id):
+        try:
+            ticket = Ticket.objects.select_related('user', 'queue__service').get(pk=ticket_id)
+        except Ticket.DoesNotExist:
+            return api_error('Ticket introuvable.', 404)
+        if ticket.status != Ticket.STATUS_CALLED:
+            return api_error('Seul un ticket appelé peut être marqué absent.', 400)
+        ticket.mark_missed()
+        return api_response(data=TicketSerializer(ticket).data, message='Ticket marqué comme absent.')
 
 
 class RateTicketView(APIView):

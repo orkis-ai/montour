@@ -9,11 +9,29 @@ from .models import Queue
 
 class QueueTicketPreviewSerializer(serializers.ModelSerializer):
     """Aperçu léger d'un ticket dans la liste de file."""
-    user_name = serializers.CharField(source='user.username', read_only=True)
+    user_name = serializers.SerializerMethodField()
+    is_mine   = serializers.SerializerMethodField()
 
     class Meta:
         model  = Ticket
-        fields = ['id', 'number', 'priority', 'priority_score', 'estimated_wait', 'user_name', 'requested_at']
+        fields = ['id', 'number', 'priority', 'priority_score', 'estimated_wait',
+                  'user_name', 'is_mine', 'requested_at']
+
+    def _user(self):
+        request = self.context.get('request')
+        return getattr(request, 'user', None)
+
+    def get_is_mine(self, obj):
+        user = self._user()
+        return bool(user and user.is_authenticated and obj.user_id == user.id)
+
+    def get_user_name(self, obj):
+        # Vie privée : un usager ne voit pas le nom des autres personnes en file
+        # (seuls les agents/admin et le propriétaire du ticket voient le nom).
+        user = self._user()
+        if user and user.is_authenticated and (obj.user_id == user.id or user.role in ('agent', 'admin')):
+            return obj.user.username
+        return 'Usager'
 
 
 class QueueSerializer(serializers.ModelSerializer):
@@ -34,4 +52,4 @@ class QueueSerializer(serializers.ModelSerializer):
 
     def get_tickets(self, obj):
         waiting = obj.tickets.filter(status='waiting').order_by('-priority_score', 'requested_at')
-        return QueueTicketPreviewSerializer(waiting[:20], many=True).data
+        return QueueTicketPreviewSerializer(waiting.select_related('user')[:20], many=True, context=self.context).data

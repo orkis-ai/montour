@@ -8,6 +8,8 @@ from montour.validators import sanitize_text
 
 
 class TicketSerializer(serializers.ModelSerializer):
+    service_id    = serializers.UUIDField(source='queue.service_id', read_only=True)
+    queue_id      = serializers.UUIDField(read_only=True)
     service_name  = serializers.CharField(source='queue.service.name', read_only=True)
     service_icon  = serializers.CharField(source='queue.service.icon', read_only=True)
     service_color = serializers.CharField(source='queue.service.color', read_only=True)
@@ -19,7 +21,7 @@ class TicketSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'number', 'status', 'priority', 'priority_score',
             'estimated_wait', 'actual_wait', 'position',
-            'service_name', 'service_icon', 'service_color', 'user_name',
+            'service_id', 'queue_id', 'service_name', 'service_icon', 'service_color', 'user_name',
             'requested_at', 'called_at', 'served_at', 'cancelled_at',
             'rating', 'feedback',
         ]

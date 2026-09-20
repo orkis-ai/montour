@@ -112,7 +112,7 @@ def seed():
     print("  -- Creation des services et files d'attente a Segbana...")
     services_data = [
         {
-            'name': 'Centre de Santé de Ségbana 🏥',
+            'name': 'Centre de Santé de Ségbana',
             'description': 'Consultations générales, urgences médicales et soins primaires de la commune de Ségbana.',
             'category': Service.CATEGORY_HEALTH,
             'icon': '🏥',
@@ -122,7 +122,7 @@ def seed():
             'phone': '+229 21301001',
         },
         {
-            'name': 'Guichet Administratif (Mairie) 🏛️',
+            'name': 'Guichet Administratif (Mairie)',
             'description': 'Délivrance d\'actes d\'état civil, légalisations et démarches administratives locales.',
             'category': Service.CATEGORY_ADMIN,
             'icon': '🏛️',
@@ -132,7 +132,7 @@ def seed():
             'phone': '+229 21301002',
         },
         {
-            'name': 'Agence PEBCO Ségbana 🏦',
+            'name': 'Agence PEBCO Ségbana',
             'description': 'Service de microfinance, épargne, crédit aux producteurs et transferts d\'argent.',
             'category': Service.CATEGORY_FINANCE,
             'icon': '🏦',
@@ -142,7 +142,7 @@ def seed():
             'phone': '+229 21301003',
         },
         {
-            'name': 'ATDA Pôle 4 Ségbana 🌾',
+            'name': 'ATDA Pôle 4 Ségbana',
             'description': 'Agence Territoriale de Développement Agricole — Appui aux filières maïs, coton et élevage.',
             'category': Service.CATEGORY_AGRICULTURE,
             'icon': '🌾',
@@ -154,7 +154,11 @@ def seed():
     ]
 
     for sdata in services_data:
-        service, _ = Service.objects.get_or_create(name=sdata['name'], defaults=sdata)
+        # Les services par défaut sont déjà créés par la migration queues.0002 : on les réutilise
+        # (recherche par préfixe, ils peuvent porter un ancien nom avec emoji) au lieu de les dupliquer.
+        service = Service.objects.filter(name__startswith=sdata['name']).first()
+        if service is None:
+            service = Service.objects.create(**sdata)
 
         # Horaires (Lun-Ven 8h-17h, Sam 8h-12h)
         for day in range(7):

@@ -23,7 +23,7 @@ class QueueDetailView(APIView):
             ).get(service__pk=service_id)
         except Queue.DoesNotExist:
             return api_error('File d\'attente introuvable.', 404)
-        return api_response(data=QueueSerializer(queue).data)
+        return api_response(data=QueueSerializer(queue, context={'request': request}).data)
 
 
 class QueueListView(ListAPIView):

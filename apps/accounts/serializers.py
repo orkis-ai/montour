@@ -112,7 +112,8 @@ class UserSerializer(serializers.ModelSerializer):
         model  = User
         fields = [
             'id', 'username', 'email', 'phone', 'role',
-            'priority', 'avatar_url', 'email_verified', 'date_joined', 'last_login',
+            'priority', 'avatar_url', 'email_verified', 'sms_notifications',
+            'date_joined', 'last_login',
         ]
         read_only_fields = ['id', 'email', 'role', 'date_joined', 'last_login', 'email_verified']
 
@@ -127,7 +128,7 @@ class UserSerializer(serializers.ModelSerializer):
 class UpdateProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model  = User
-        fields = ['username', 'phone', 'priority', 'avatar']
+        fields = ['username', 'phone', 'priority', 'avatar', 'sms_notifications']
 
     def validate_username(self, value):
         """Validation du nom d'utilisateur."""

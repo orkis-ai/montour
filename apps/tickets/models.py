@@ -56,6 +56,9 @@ class Ticket(models.Model):
     served_at       = models.DateTimeField(null=True, blank=True)
     cancelled_at    = models.DateTimeField(null=True, blank=True)
 
+    # Rappel « votre tour approche » déjà envoyé (une seule fois par ticket)
+    approach_notified_at = models.DateTimeField(null=True, blank=True)
+
     # Durée réelle d'attente (calculée à la clôture)
     actual_wait     = models.PositiveIntegerField(null=True, blank=True, help_text='Durée réelle en minutes')
 

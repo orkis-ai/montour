@@ -309,6 +309,27 @@ EMAIL_BACKEND = (
 if IS_VERCEL:
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
+# ─── SMS (rappel « votre tour approche ») ─────────────────────
+# Fournisseur détecté selon les variables présentes (Twilio, puis Africa's Talking),
+# ou forcé par SMS_PROVIDER = twilio | africastalking | console. Voir .env.example.
+SMS_ENABLED = os.getenv('SMS_ENABLED', 'True').lower() in ('true', '1', 'yes')
+SMS_PROVIDER = os.getenv('SMS_PROVIDER', '').strip().lower()
+# Délai maximal d'un appel au fournisseur (les fonctions Vercel s'arrêtent vers 10 s).
+SMS_TIMEOUT = int(os.getenv('SMS_TIMEOUT', 5))
+# Un SMS « votre tour approche » part quand il reste au plus N personnes avant l'usager.
+SMS_APPROACH_THRESHOLD = int(os.getenv('SMS_APPROACH_THRESHOLD', 2))
+# Numérotation béninoise à 10 chiffres (préfixe 01 ajouté aux anciens numéros à 8 chiffres).
+SMS_BENIN_TEN_DIGITS = os.getenv('SMS_BENIN_TEN_DIGITS', 'True').lower() in ('true', '1', 'yes')
+
+TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID', '')
+TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN', '')
+TWILIO_FROM = os.getenv('TWILIO_FROM', '')                          # numéro Twilio ou nom d'expéditeur
+TWILIO_MESSAGING_SERVICE_SID = os.getenv('TWILIO_MESSAGING_SERVICE_SID', '')
+
+AT_USERNAME = os.getenv('AT_USERNAME', '')                          # « sandbox » pour les essais
+AT_API_KEY = os.getenv('AT_API_KEY', '')
+AT_SENDER_ID = os.getenv('AT_SENDER_ID', '')
+
 # ─── Logging (compatible environnements serverless read-only) ──
 LOGS_DIR = BASE_DIR / 'logs'
 has_file_logging = False

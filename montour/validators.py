@@ -102,15 +102,17 @@ def validate_password_strength(value):
 
 
 # ─── Validation téléphone béninois ───────────────────────────
+# 8 chiffres (ancien format) ou 10 chiffres avec le préfixe 01 (numérotation actuelle),
+# précédés ou non de +229.
 PHONE_BENIN_REGEX = re.compile(
-    r'^(?:\+229)?[0-9]{8}$'
+    r'^(?:\+229)?(?:01)?[0-9]{8}$'
 )
 
 
 def validate_phone_benin(value):
     """
     Valide un numéro de téléphone béninois :
-    - Format : +229XXXXXXXX ou XXXXXXXX (8 chiffres)
+    - Format : +229XXXXXXXX, 01XXXXXXXX (10 chiffres) ou XXXXXXXX (8 chiffres)
     - Facultatif : champ vide autorisé
     """
     if not value:
@@ -124,7 +126,7 @@ def validate_phone_benin(value):
 
     if not PHONE_BENIN_REGEX.match(cleaned):
         raise serializers.ValidationError(
-            'Format de téléphone invalide. Utilisez le format +229XXXXXXXX ou XXXXXXXX (8 chiffres).'
+            'Format de téléphone invalide. Utilisez +229XXXXXXXX, 01XXXXXXXX ou XXXXXXXX.'
         )
 
     return cleaned
