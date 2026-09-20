@@ -304,6 +304,28 @@ class EmailLinkSecurityTests(APITestCase):
         self.assertFalse(resp.data['data']['email_sent'])
 
 
+class SmtpFailureTests(APITestCase):
+    """Un SMTP qui refuse les identifiants ne doit ni faire planter l'inscription ni passer inaperçu."""
+
+    def setUp(self):
+        cache.clear()
+
+    def test_register_survives_smtp_auth_error_and_reports_it(self):
+        import smtplib
+        from unittest import mock
+        err = smtplib.SMTPAuthenticationError(535, b'5.7.8 Username and Password not accepted')
+        with mock.patch('apps.accounts.emails.send_mail', side_effect=err), \
+                self.assertLogs('apps', level='ERROR') as logs:
+            resp = self.client.post('/api/v1/auth/register/', {
+                'username': 'Moussa Test', 'email': 'moussa@test.bj', 'phone': '+22961000000',
+                'password': 'TestPass123!', 'password2': 'TestPass123!', 'priority': 'normal',
+            }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(resp.data['data']['email_sent'])
+        self.assertTrue(any("mot de passe d'application" in m for m in logs.output))
+        self.assertTrue(User.objects.filter(email='moussa@test.bj').exists())
+
+
 class HealthTests(APITestCase):
     def test_health_reports_persistent_storage(self):
         resp = self.client.get('/api/health/')

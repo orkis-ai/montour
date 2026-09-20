@@ -291,6 +291,8 @@ FIREBASE_PROJECT_ID = os.getenv('FIREBASE_PROJECT_ID', 'montour-benin')
 EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
 EMAIL_PORT = int(os.getenv('EMAIL_PORT', 587))
 EMAIL_USE_TLS = True
+# Sans délai, un SMTP injoignable bloquerait la requête jusqu'au timeout de la fonction serverless.
+EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', 10))
 EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'MonTour <noreply@montour.bj>')

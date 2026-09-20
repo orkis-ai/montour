@@ -4,6 +4,7 @@
 # =============================================================
 
 import logging
+import smtplib
 from urllib.parse import urlencode
 
 from django.conf import settings
@@ -45,6 +46,15 @@ def _send(user, subject, body):
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[user.email],
         )
+    except smtplib.SMTPAuthenticationError as e:
+        # 535 : identifiants refusés. Avec Gmail, le mot de passe du compte est rejeté :
+        # il faut un « mot de passe d'application » (validation en 2 étapes activée).
+        logger.error(
+            f"[EMAIL] Identifiants SMTP refusés par {settings.EMAIL_HOST} pour « {subject} » "
+            f"à {user.email} : {e}. Vérifiez EMAIL_HOST_USER / EMAIL_HOST_PASSWORD "
+            "(Gmail : utiliser un mot de passe d'application)."
+        )
+        return False
     except Exception as e:
         logger.error(f'[EMAIL] Échec d\'envoi « {subject} » à {user.email} : {e}')
         return False
