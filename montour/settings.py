@@ -310,8 +310,8 @@ if IS_VERCEL:
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 # ─── SMS (rappel « votre tour approche ») ─────────────────────
-# Fournisseur détecté selon les variables présentes (Twilio, puis Africa's Talking),
-# ou forcé par SMS_PROVIDER = twilio | africastalking | console. Voir .env.example.
+# Envoi via eSMS Africa (https://esmsafrica.io) dès qu'une clé API est fournie ;
+# sinon fournisseur « console » (aucun envoi). SMS_PROVIDER = esms | console force le choix.
 SMS_ENABLED = os.getenv('SMS_ENABLED', 'True').lower() in ('true', '1', 'yes')
 SMS_PROVIDER = os.getenv('SMS_PROVIDER', '').strip().lower()
 # Délai maximal d'un appel au fournisseur (les fonctions Vercel s'arrêtent vers 10 s).
@@ -321,14 +321,13 @@ SMS_APPROACH_THRESHOLD = int(os.getenv('SMS_APPROACH_THRESHOLD', 2))
 # Numérotation béninoise à 10 chiffres (préfixe 01 ajouté aux anciens numéros à 8 chiffres).
 SMS_BENIN_TEN_DIGITS = os.getenv('SMS_BENIN_TEN_DIGITS', 'True').lower() in ('true', '1', 'yes')
 
-TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID', '')
-TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN', '')
-TWILIO_FROM = os.getenv('TWILIO_FROM', '')                          # numéro Twilio ou nom d'expéditeur
-TWILIO_MESSAGING_SERVICE_SID = os.getenv('TWILIO_MESSAGING_SERVICE_SID', '')
-
-AT_USERNAME = os.getenv('AT_USERNAME', '')                          # « sandbox » pour les essais
-AT_API_KEY = os.getenv('AT_API_KEY', '')
-AT_SENDER_ID = os.getenv('AT_SENDER_ID', '')
+# Clé API eSMS Africa (Tableau de bord > Developers > API Keys : esms_live_… ou esms_test_…).
+# Les noms de variables sont sensibles à la casse : on accepte aussi « esms_API_KEY ».
+ESMS_API_KEY = (os.getenv('ESMS_API_KEY') or os.getenv('esms_API_KEY') or '').strip()
+ESMS_BASE_URL = os.getenv('ESMS_BASE_URL', 'https://sms.esmsafrica.io/api')
+# Nom d'expéditeur affiché. Au Bénin il doit être enregistré au préalable chez eSMS Africa ;
+# vide = expéditeur par défaut du compte.
+ESMS_SENDER_ID = os.getenv('ESMS_SENDER_ID', '').strip()
 
 # ─── Logging (compatible environnements serverless read-only) ──
 LOGS_DIR = BASE_DIR / 'logs'

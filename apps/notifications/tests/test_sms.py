@@ -15,7 +15,7 @@ from apps.accounts.models import User
 from apps.notifications.models import Notification, SMSLog
 from apps.notifications.services import NotificationService
 from apps.notifications.sms import (
-    AfricasTalkingProvider, SMSResult, SMSService, TwilioProvider,
+    ESMSAfricaProvider, SMSResult, SMSService,
     get_provider, gsm_safe, normalize_phone,
 )
 from apps.queues.models import Queue
@@ -67,23 +67,20 @@ class PhoneTests(TestCase):
 
 
 class ProviderSelectionTests(TestCase):
-    @override_settings(SMS_PROVIDER='', TWILIO_ACCOUNT_SID='', TWILIO_AUTH_TOKEN='', AT_USERNAME='', AT_API_KEY='')
-    def test_defaults_to_console(self):
+    @override_settings(SMS_PROVIDER='', ESMS_API_KEY='')
+    def test_defaults_to_console_without_key(self):
         self.assertEqual(get_provider().name, 'console')
 
-    @override_settings(SMS_PROVIDER='', TWILIO_ACCOUNT_SID='AC1', TWILIO_AUTH_TOKEN='t', TWILIO_FROM='+1555')
-    def test_detects_twilio(self):
-        self.assertEqual(get_provider().name, 'twilio')
+    @override_settings(SMS_PROVIDER='', ESMS_API_KEY='esms_live_abc')
+    def test_uses_esms_as_soon_as_a_key_is_present(self):
+        self.assertEqual(get_provider().name, 'esms')
 
-    @override_settings(SMS_PROVIDER='', TWILIO_ACCOUNT_SID='', TWILIO_AUTH_TOKEN='', AT_USERNAME='u', AT_API_KEY='k')
-    def test_detects_africastalking(self):
-        self.assertEqual(get_provider().name, 'africastalking')
-
-    @override_settings(SMS_PROVIDER='twilio', TWILIO_ACCOUNT_SID='AC1', TWILIO_AUTH_TOKEN='t', TWILIO_FROM='', TWILIO_MESSAGING_SERVICE_SID='')
-    def test_incomplete_twilio_config_is_rejected(self):
+    @override_settings(SMS_PROVIDER='esms', ESMS_API_KEY='')
+    def test_forced_esms_without_key_is_rejected(self):
         self.assertIsNone(get_provider())
         result = SMSService.send('+2290161000000', 'x')
         self.assertFalse(result.ok)
+        self.assertIn('ESMS_API_KEY', result.error)
 
     @override_settings(SMS_PROVIDER='inconnu')
     def test_unknown_provider(self):
@@ -100,75 +97,77 @@ class ProviderSelectionTests(TestCase):
         self.assertTrue(SMSService.send('+2290161000000', 'x').ok)
 
 
-@override_settings(TWILIO_ACCOUNT_SID='AC123', TWILIO_AUTH_TOKEN='tok', TWILIO_FROM='MonTour', TWILIO_MESSAGING_SERVICE_SID='')
-class TwilioTests(TestCase):
+@override_settings(ESMS_API_KEY='esms_live_secret', ESMS_BASE_URL='https://sms.esmsafrica.io/api', ESMS_SENDER_ID='')
+class ESMSAfricaTests(TestCase):
     def _resp(self, status_code, body):
         r = mock.Mock(status_code=status_code, content=b'{}', text=str(body))
         r.json.return_value = body
         return r
 
-    def test_success(self):
-        with mock.patch('apps.notifications.sms.requests.post', return_value=self._resp(201, {'sid': 'SM42'})) as post:
-            result = TwilioProvider().send('+2290161000000', 'Bonjour')
+    def test_success_matches_documented_contract(self):
+        body = {'id': 'msg_123', 'status': 'submitted', 'segments': 1, 'cost': 0.03, 'balance_after': 10}
+        with mock.patch('apps.notifications.sms.requests.post', return_value=self._resp(200, body)) as post:
+            result = ESMSAfricaProvider().send('+2290161000000', 'Bonjour')
         self.assertTrue(result.ok)
-        self.assertEqual(result.message_id, 'SM42')
-        args, kwargs = post.call_args
-        self.assertIn('/Accounts/AC123/Messages.json', args[0])
-        self.assertEqual(kwargs['auth'], ('AC123', 'tok'))
-        self.assertEqual(kwargs['data'], {'To': '+2290161000000', 'Body': 'Bonjour', 'From': 'MonTour'})
-        self.assertIn('timeout', kwargs)
+        self.assertEqual(result.message_id, 'msg_123')
+        self.assertEqual(result.provider, 'esms')
+        self.assertEqual(post.call_args.args[0], 'https://sms.esmsafrica.io/api/messages/send')
+        self.assertEqual(post.call_args.kwargs['json'], {'to': '+2290161000000', 'text': 'Bonjour'})
+        self.assertEqual(post.call_args.kwargs['headers']['Authorization'], 'Bearer esms_live_secret')
+        self.assertIn('timeout', post.call_args.kwargs)
 
-    @override_settings(TWILIO_MESSAGING_SERVICE_SID='MG1')
-    def test_messaging_service_replaces_from(self):
-        with mock.patch('apps.notifications.sms.requests.post', return_value=self._resp(201, {'sid': 'x'})) as post:
-            TwilioProvider().send('+2290161000000', 'Bonjour')
-        data = post.call_args.kwargs['data']
-        self.assertEqual(data['MessagingServiceSid'], 'MG1')
-        self.assertNotIn('From', data)
+    @override_settings(ESMS_SENDER_ID='MonTour')
+    def test_sender_id_is_sent_when_configured(self):
+        with mock.patch('apps.notifications.sms.requests.post', return_value=self._resp(200, {'id': '1', 'status': 'queued'})) as post:
+            ESMSAfricaProvider().send('+2290161000000', 'x')
+        self.assertEqual(post.call_args.kwargs['json']['sender_id'], 'MonTour')
 
-    def test_api_error(self):
-        resp = self._resp(400, {'code': 21211, 'message': "Invalid 'To' Phone Number"})
-        with mock.patch('apps.notifications.sms.requests.post', return_value=resp):
-            result = TwilioProvider().send('+2290161000000', 'x')
+    @override_settings(ESMS_BASE_URL='https://exemple.test/api/')
+    def test_base_url_is_configurable(self):
+        with mock.patch('apps.notifications.sms.requests.post', return_value=self._resp(200, {'id': '1', 'status': 'queued'})) as post:
+            ESMSAfricaProvider().send('+2290161000000', 'x')
+        self.assertEqual(post.call_args.args[0], 'https://exemple.test/api/messages/send')
+
+    def test_failed_status_in_a_200_response_is_a_failure(self):
+        body = {'id': 'msg_1', 'status': 'failed', 'error_message': 'Numéro invalide'}
+        with mock.patch('apps.notifications.sms.requests.post', return_value=self._resp(200, body)):
+            result = ESMSAfricaProvider().send('+2290161000000', 'x')
         self.assertFalse(result.ok)
-        self.assertIn('21211', result.error)
+        self.assertIn('Numéro invalide', result.error)
+
+    def test_documented_http_errors_have_actionable_messages(self):
+        cases = {401: 'ESMS_API_KEY', 402: 'Solde', 429: 'cadence'}
+        for code, expected in cases.items():
+            with mock.patch('apps.notifications.sms.requests.post', return_value=self._resp(code, {})):
+                result = ESMSAfricaProvider().send('+2290161000000', 'x')
+            self.assertFalse(result.ok, code)
+            self.assertIn(expected, result.error, code)
+            self.assertIn(str(code), result.error)
+
+    def test_validation_error_detail_is_kept(self):
+        with mock.patch('apps.notifications.sms.requests.post', return_value=self._resp(422, {'message': 'to invalide'})):
+            result = ESMSAfricaProvider().send('+2290161000000', 'x')
+        self.assertFalse(result.ok)
+        self.assertIn('to invalide', result.error)
+
+    def test_non_json_error_body(self):
+        resp = mock.Mock(status_code=502, content=b'<html>Bad gateway</html>', text='<html>Bad gateway</html>')
+        resp.json.side_effect = ValueError('no json')
+        with mock.patch('apps.notifications.sms.requests.post', return_value=resp):
+            result = ESMSAfricaProvider().send('+2290161000000', 'x')
+        self.assertFalse(result.ok)
+        self.assertIn('502', result.error)
 
     def test_network_error(self):
         with mock.patch('apps.notifications.sms.requests.post', side_effect=requests.Timeout('lent')):
-            result = TwilioProvider().send('+2290161000000', 'x')
+            result = ESMSAfricaProvider().send('+2290161000000', 'x')
         self.assertFalse(result.ok)
         self.assertIn('réseau', result.error)
 
-
-@override_settings(AT_USERNAME='monapp', AT_API_KEY='key', AT_SENDER_ID='')
-class AfricasTalkingTests(TestCase):
-    def _resp(self, status_code, body):
-        r = mock.Mock(status_code=status_code, content=b'{}', text=str(body))
-        r.json.return_value = body
-        return r
-
-    def test_success(self):
-        body = {'SMSMessageData': {'Recipients': [{'status': 'Success', 'messageId': 'ATXid_1'}]}}
-        with mock.patch('apps.notifications.sms.requests.post', return_value=self._resp(201, body)) as post:
-            result = AfricasTalkingProvider().send('+2290161000000', 'Bonjour')
-        self.assertTrue(result.ok)
-        self.assertEqual(result.message_id, 'ATXid_1')
-        self.assertEqual(post.call_args.kwargs['headers']['apiKey'], 'key')
-        self.assertIn('api.africastalking.com', post.call_args.args[0])
-
-    @override_settings(AT_USERNAME='sandbox')
-    def test_sandbox_url(self):
-        body = {'SMSMessageData': {'Recipients': [{'status': 'Success', 'messageId': 'x'}]}}
-        with mock.patch('apps.notifications.sms.requests.post', return_value=self._resp(201, body)) as post:
-            AfricasTalkingProvider().send('+2290161000000', 'x')
-        self.assertIn('sandbox', post.call_args.args[0])
-
-    def test_recipient_failure(self):
-        body = {'SMSMessageData': {'Recipients': [{'status': 'InvalidPhoneNumber'}]}}
-        with mock.patch('apps.notifications.sms.requests.post', return_value=self._resp(201, body)):
-            result = AfricasTalkingProvider().send('+2290161000000', 'x')
-        self.assertFalse(result.ok)
-        self.assertIn('InvalidPhoneNumber', result.error)
+    def test_sms_text_is_gsm_safe_before_sending(self):
+        with mock.patch('apps.notifications.sms.requests.post', return_value=self._resp(200, {'id': '1', 'status': 'queued'})) as post:
+            SMSService.send('+2290161000000', "Ticket n°5 — c'est l'heure à Ségbana")
+        self.assertEqual(post.call_args.kwargs['json']['text'], "Ticket n5 - c'est l'heure a Segbana")
 
 
 class SendToUserTests(TestCase):
@@ -330,3 +329,29 @@ class ProfileSmsPreferenceTests(APITestCase):
 
     def test_sms_enabled_by_default(self):
         self.assertTrue(self.client.get('/api/v1/auth/me/').data['data']['sms_notifications'])
+
+
+class AdminTestSmsActionTests(TestCase):
+    def setUp(self):
+        self.admin = User.objects.create_superuser(email='root@test.bj', username='Root', password='pass')
+        self.target = make_user(1)
+        self.client.force_login(self.admin)
+
+    def _run_action(self):
+        return self.client.post('/admin/accounts/user/', {
+            'action': 'send_test_sms', '_selected_action': [str(self.target.pk)],
+        }, follow=True)
+
+    def test_action_sends_a_test_sms_and_logs_it(self):
+        with mock.patch.object(SMSService, 'send', return_value=OK) as send:
+            resp = self._run_action()
+        self.assertContains(resp, 'Envoyé')
+        send.assert_called_once()
+        log = SMSLog.objects.get(kind=SMSLog.KIND_TEST)
+        self.assertEqual((log.user, log.status, log.to), (self.target, 'sent', '+2290161000000'))
+
+    def test_action_reports_provider_failure_to_the_admin(self):
+        with mock.patch.object(SMSService, 'send', return_value=SMSResult(False, 'esms', error='HTTP 402 : Solde insuffisant')):
+            resp = self._run_action()
+        self.assertContains(resp, 'Solde insuffisant')
+        self.assertEqual(SMSLog.objects.get(kind=SMSLog.KIND_TEST).status, 'failed')

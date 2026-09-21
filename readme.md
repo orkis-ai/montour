@@ -94,8 +94,11 @@ Quand la file avance (appel du suivant, annulation, service), l'API prévient pa
 Chaque usager peut désactiver les SMS ou changer son numéro depuis son profil. Les numéros béninois sont normalisés en `+229 01XXXXXXXX`
 (les anciens numéros à 8 chiffres sont acceptés et convertis). Tous les envois, échecs et abandons sont visibles dans l'admin Django (**SMS**).
 
-Configuration : un fournisseur (Twilio ou Africa's Talking) — voir la section SMS de `.env.example`. Sans fournisseur, aucun SMS n'est
-envoyé ; en développement, `SMS_PROVIDER=console` affiche le SMS dans la console du serveur. Un échec du fournisseur ne bloque jamais l'appel d'un ticket.
+Envoi via **eSMS Africa** : renseignez `ESMS_API_KEY` (et `ESMS_SENDER_ID` si vous avez un nom d'expéditeur enregistré — obligatoire
+au Bénin pour un expéditeur alphanumérique). Sans clé, aucun SMS n'est envoyé ; en développement, `SMS_PROVIDER=console` affiche le SMS
+dans la console du serveur. Un échec du fournisseur (solde épuisé, clé refusée…) ne bloque jamais l'appel d'un ticket.
+Pour valider la configuration en production : admin Django > Utilisateurs > sélectionner un utilisateur > action
+« Envoyer un SMS de test », puis consulter **SMS**.
 
 > L'interface web utilise l'API pour tout (services, files, tickets, notifications) : ses tickets déclenchent donc ces SMS.
 > Les quatre services de Ségbana et leurs files sont créés automatiquement par la migration `queues.0002` (aucun compte

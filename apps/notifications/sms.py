@@ -1,11 +1,11 @@
 # =============================================================
 # MonTour — apps/notifications/sms.py
-# Envoi de SMS (rappel « votre tour approche ») via un fournisseur interchangeable :
-#   - twilio          (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM ou TWILIO_MESSAGING_SERVICE_SID)
-#   - africastalking  (AT_USERNAME, AT_API_KEY, AT_SENDER_ID optionnel)
-#   - console         (aucun envoi : le SMS est seulement journalisé — développement)
-# Le fournisseur est détecté selon les variables présentes, ou forcé par SMS_PROVIDER.
-# Un échec d'envoi n'interrompt JAMAIS l'action de l'usager ou de l'agent : il est journalisé.
+# Envoi de SMS (rappel « votre tour approche ») via eSMS Africa (https://esmsafrica.io).
+#   - esms     : clé API dans ESMS_API_KEY (voir .env.example)
+#   - console  : aucun envoi, le SMS est seulement journalisé (développement)
+# Sans clé API, le fournisseur « console » est utilisé ; en production il n'envoie rien
+# et le signale. Un échec d'envoi n'interrompt JAMAIS l'action de l'usager ou de l'agent :
+# il est journalisé (SMSLog + logs).
 # =============================================================
 
 import logging
@@ -32,8 +32,8 @@ def normalize_phone(raw):
     """
     Convertit un numéro béninois saisi par l'usager en format international E.164.
     Accepte : +229XXXXXXXX, XXXXXXXX (8 chiffres, ancien format), 01XXXXXXXX et
-    +22901XXXXXXXX (10 chiffres, depuis le passage du Bénin à 10 chiffres).
-    Retourne None si le numéro n'est pas exploitable.
+    +22901XXXXXXXX (10 chiffres : depuis le 30/11/2024 tous les numéros béninois
+    portent le préfixe 01). Retourne None si le numéro n'est pas exploitable.
     """
     if not raw:
         return None
@@ -75,73 +75,60 @@ class ConsoleProvider:
         return SMSResult(ok=True, provider=self.name, message_id='console')
 
 
-class TwilioProvider:
-    name = 'twilio'
+class ESMSAfricaProvider:
+    """
+    eSMS Africa — POST {ESMS_BASE_URL}/messages/send
+    En-tête « Authorization: Bearer <clé> », corps JSON {to, text, sender_id?}.
+    Réponse : {id, status (queued|submitted|delivered|failed), segments, cost, balance_after…}.
+    Erreurs : 401 clé invalide, 402 solde insuffisant, 400/422 requête invalide, 429 cadence.
+    """
+    name = 'esms'
+
+    ERRORS = {
+        401: 'Clé API eSMS Africa refusée (ESMS_API_KEY invalide).',
+        402: 'Solde eSMS Africa insuffisant : rechargez le compte.',
+        429: 'Limite de cadence eSMS Africa atteinte.',
+    }
 
     def send(self, to, text):
-        sid, token = settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN
-        data = {'To': to, 'Body': text}
-        if settings.TWILIO_MESSAGING_SERVICE_SID:
-            data['MessagingServiceSid'] = settings.TWILIO_MESSAGING_SERVICE_SID
-        else:
-            data['From'] = settings.TWILIO_FROM
+        payload = {'to': to, 'text': text}
+        if settings.ESMS_SENDER_ID:
+            payload['sender_id'] = settings.ESMS_SENDER_ID
         try:
             resp = requests.post(
-                f'https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json',
-                data=data, auth=(sid, token), timeout=settings.SMS_TIMEOUT,
-            )
-            body = resp.json() if resp.content else {}
-        except (requests.RequestException, ValueError) as e:
-            return SMSResult(ok=False, provider=self.name, error=f'Erreur réseau : {e}')
-        if resp.status_code in (200, 201):
-            return SMSResult(ok=True, provider=self.name, message_id=body.get('sid', ''))
-        return SMSResult(
-            ok=False, provider=self.name,
-            error=f"HTTP {resp.status_code} {body.get('code', '')} {body.get('message', resp.text[:200])}".strip(),
-        )
-
-
-class AfricasTalkingProvider:
-    name = 'africastalking'
-
-    def send(self, to, text):
-        base = 'api.sandbox.africastalking.com' if settings.AT_USERNAME == 'sandbox' else 'api.africastalking.com'
-        data = {'username': settings.AT_USERNAME, 'to': to, 'message': text}
-        if settings.AT_SENDER_ID:
-            data['from'] = settings.AT_SENDER_ID
-        try:
-            resp = requests.post(
-                f'https://{base}/version1/messaging', data=data,
-                headers={'apiKey': settings.AT_API_KEY, 'Accept': 'application/json'},
+                f"{settings.ESMS_BASE_URL.rstrip('/')}/messages/send",
+                json=payload,
+                headers={'Authorization': f'Bearer {settings.ESMS_API_KEY}', 'Accept': 'application/json'},
                 timeout=settings.SMS_TIMEOUT,
             )
+        except requests.RequestException as e:
+            return SMSResult(ok=False, provider=self.name, error=f'Erreur réseau : {str(e)[:200]}')
+        try:
             body = resp.json() if resp.content else {}
-        except (requests.RequestException, ValueError) as e:
-            return SMSResult(ok=False, provider=self.name, error=f'Erreur réseau : {e}')
-        recipients = (body.get('SMSMessageData') or {}).get('Recipients') or []
-        if resp.status_code in (200, 201) and recipients and recipients[0].get('status') == 'Success':
-            return SMSResult(ok=True, provider=self.name, message_id=recipients[0].get('messageId', ''))
-        detail = recipients[0].get('status') if recipients else resp.text[:200]
-        return SMSResult(ok=False, provider=self.name, error=f'HTTP {resp.status_code} {detail}')
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+
+        if resp.status_code in (200, 201, 202):
+            if str(body.get('status', '')).lower() == 'failed':
+                return SMSResult(ok=False, provider=self.name, message_id=str(body.get('id', '')),
+                                 error=f"Refusé par eSMS Africa : {body.get('error_message') or 'échec'}")
+            return SMSResult(ok=True, provider=self.name, message_id=str(body.get('id', '')))
+
+        detail = self.ERRORS.get(resp.status_code) or (
+            body.get('message') or body.get('error') or body.get('detail') or resp.text[:200]
+        )
+        return SMSResult(ok=False, provider=self.name, error=f'HTTP {resp.status_code} : {detail}')
 
 
 def get_provider():
-    """Fournisseur actif, ou None si la configuration est incomplète."""
+    """Fournisseur actif, ou None si la configuration est invalide."""
     name = settings.SMS_PROVIDER
     if not name:
-        if settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN:
-            name = 'twilio'
-        elif settings.AT_USERNAME and settings.AT_API_KEY:
-            name = 'africastalking'
-        else:
-            name = 'console'
-    if name == 'twilio':
-        ok = settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN and (
-            settings.TWILIO_FROM or settings.TWILIO_MESSAGING_SERVICE_SID)
-        return TwilioProvider() if ok else None
-    if name == 'africastalking':
-        ok = settings.AT_USERNAME and settings.AT_API_KEY
-        return AfricasTalkingProvider() if ok else None
+        name = 'esms' if settings.ESMS_API_KEY else 'console'
+    if name in ('esms', 'esmsafrica'):
+        return ESMSAfricaProvider() if settings.ESMS_API_KEY else None
     if name == 'console':
         return ConsoleProvider()
     return None
@@ -155,10 +142,10 @@ class SMSService:
         """Envoie un SMS. Ne lève jamais d'exception."""
         provider = get_provider()
         if provider is None:
-            return SMSResult(ok=False, provider='', error='Fournisseur SMS non configuré ou incomplet.')
+            return SMSResult(ok=False, provider='', error='Fournisseur SMS non configuré (ESMS_API_KEY manquante).')
         if isinstance(provider, ConsoleProvider) and not settings.DEBUG:
             # En production, « console » = personne ne reçoit rien : on ne fait pas semblant.
-            logger.error('[SMS] Aucun fournisseur SMS configuré : SMS NON délivré (voir .env.example).')
+            logger.error('[SMS] Aucun fournisseur SMS configuré (ESMS_API_KEY) : SMS NON délivré.')
             return SMSResult(ok=False, provider=provider.name, error='Aucun fournisseur SMS configuré.')
         try:
             return provider.send(to, gsm_safe(text))

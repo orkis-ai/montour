@@ -2,7 +2,7 @@
 # MonTour — apps/accounts/admin.py
 # =============================================================
 
-from django.contrib import admin
+from django.contrib import admin, messages
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from .models import User, FCMToken, PasswordResetToken
 
@@ -29,6 +29,26 @@ class UserAdmin(BaseUserAdmin):
         }),
     )
     readonly_fields = ['date_joined', 'last_login']
+
+    actions = ['send_test_sms']
+
+    @admin.action(description='Envoyer un SMS de test aux utilisateurs sélectionnés')
+    def send_test_sms(self, request, queryset):
+        """Vérifie la configuration eSMS Africa en production (résultat aussi visible dans SMS)."""
+        from apps.notifications.models import SMSLog
+        from apps.notifications.sms import SMSService
+        for user in queryset:
+            entry = SMSService.send_to_user(
+                user, 'MonTour : SMS de test, la configuration des rappels fonctionne.',
+                kind=SMSLog.KIND_TEST,
+            )
+            level = messages.SUCCESS if entry.status == SMSLog.STATUS_SENT else messages.WARNING
+            self.message_user(
+                request,
+                f"{user.username} : {entry.get_status_display()}"
+                + (f" — {entry.error}" if entry.error else f" ({entry.to})"),
+                level,
+            )
 
 
 @admin.register(FCMToken)
